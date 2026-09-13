@@ -1,0 +1,17 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "plugin": [
+    [
+      "opencode-mission",
+      {
+        "max_mission_token_budget": 200000,
+        "auto_continue": true,
+        "min_continue_interval_ms": 250,
+        "failed_exec_threshold": 3,
+        "empty_auto_threshold": 3,
+        "descendant_max_depth": 6,
+        "descendant_max_sessions": 96
+      }
+    ]
+  ]
+}

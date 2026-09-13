@@ -1,0 +1,47 @@
+{
+  "name": "opencode-mission",
+  "version": "0.1.0",
+  "description": "Persistent Codex-style Mission runtime for OpenCode: verified multi-turn objectives, budgets, auto-continuation, and circuit breakers.",
+  "type": "module",
+  "main": "./src/server.js",
+  "exports": {
+    ".": "./src/server.js"
+  },
+  "files": [
+    "src",
+    "dist/mission.js",
+    "README.md",
+    "LICENSE",
+    "docs",
+    "install.sh",
+    "install.ps1"
+  ],
+  "keywords": [
+    "opencode",
+    "plugin",
+    "mission",
+    "goal",
+    "agent",
+    "autonomous",
+    "continuation"
+  ],
+  "peerDependencies": {
+    "@opencode-ai/plugin": ">=1.18.30 <2.0.0"
+  },
+  "peerDependenciesMeta": {
+    "@opencode-ai/plugin": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@opencode-ai/plugin": "1.18.30"
+  },
+  "scripts": {
+    "build:local": "node scripts/build-local.mjs",
+    "test:unit": "node --test test/core.test.js",
+    "test:smoke": "node test/server-smoke.mjs && node test/continuation-smoke.mjs",
+    "test": "npm run test:unit && npm run test:smoke",
+    "check": "npm run build:local && node --check src/core.js && node --check src/server.js && node --check dist/mission.js && npm run test"
+  },
+  "license": "MIT"
+}
