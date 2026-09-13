@@ -72,6 +72,24 @@ Root and child-session deltas are accumulated separately and combined for the bu
 
 The model-facing `blocked` audit and runtime circuit breakers are deliberately separate concepts.
 
+Runtime-owned multi-dimensional limits are evaluated independently of token budget: automatic turn
+count, active wall-clock seconds, and consecutive no-progress turns. Reaching one persists
+`usage_limited` with a specific stop reason and clears the scheduler lease; resume resets only
+runtime audit streaks and does not bypass an exhausted limit.
+
+Completion evidence is an opt-in contract. Requirements are user/model-declared task data, while
+evidence is persisted through a separate tool. The runtime rejects `complete` when any declared
+requirement is still open; it does not execute arbitrary verification commands or treat a model's
+free-form completion reason as evidence.
+
+Verification gates are separate trusted configuration. The OpenCode adapter executes only a
+configured gate on an explicit request, then records its exit result as evidence. Automatic
+continuation does not execute gates implicitly.
+
+The adapter computes a best-effort worktree fingerprint from Git HEAD and porcelain status before
+recording a gate result. A mismatch invalidates prior evidence. Manual checkpoints store metadata
+only; they deliberately do not mutate Git history or roll back user files.
+
 - Semantic blocker: model judges the same external/user-input blocker has persisted for 3 consecutive Mission turns.
 - Failed-exec breaker: runtime sees 3 qualifying turns with failed execution and no successful tool call.
 - Empty-auto breaker: runtime sees 3 automatic continuations with no meaningful activity and no final text.

@@ -29,6 +29,13 @@ Mission relies on the permissions and capabilities already granted to OpenCode. 
 plugin does not sandbox model tools or shell commands. Review the host OpenCode permission policy
 before enabling automatic continuation for untrusted repositories or objectives.
 
+Verification gates are executable commands and therefore trusted configuration, not Mission
+objective data. Review them as code. Mission never derives a command from the objective or model
+evidence, and gates run only through explicit verification requests.
+
+Checkpoint metadata is not a backup. Mission does not silently create commits, modify Git history,
+or roll back files, so users retain control over repository recovery.
+
 ## Operational risks
 
 - An active Mission can create repeated physical turns until it reaches a stop condition.

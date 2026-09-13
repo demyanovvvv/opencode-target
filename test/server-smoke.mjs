@@ -7,6 +7,10 @@ import { MissionPlugin } from "../src/server.js"
 const stateDir = await mkdtemp(path.join(os.tmpdir(), "mission-server-smoke-"))
 const messages = new Map()
 const children = new Map()
+const shell = () => Promise.resolve({ exitCode: 0, stdout: "all checks passed", stderr: "" })
+shell.cwd = () => shell
+shell.nothrow = () => shell
+const $ = shell
 const client = {
   app: { log: async () => ({}) },
   session: {
@@ -30,7 +34,12 @@ try {
     /min_continue_interval_ms/,
   )
 
-  const hooks = await MissionPlugin({ client }, { state_dir: stateDir, auto_continue: false, max_mission_token_budget: 1000 })
+  const hooks = await MissionPlugin({ client, $, directory: process.cwd() }, {
+    state_dir: stateDir,
+    auto_continue: false,
+    max_mission_token_budget: 1000,
+    verification: [{ id: "unit", command: "npm test", requirementID: "tests" }],
+  })
   const config = {}
   await hooks.config(config)
   assert.ok(config.command.mission)
@@ -38,6 +47,9 @@ try {
   assert.ok(hooks.tool.get_mission)
   assert.ok(hooks.tool.create_mission)
   assert.ok(hooks.tool.update_mission)
+  assert.ok(hooks.tool.add_mission_evidence)
+  assert.ok(hooks.tool.verify_mission_gate)
+  assert.ok(hooks.tool.create_mission_checkpoint)
 
   const doctorOutput = { parts: [] }
   await hooks["command.execute.before"]({ command: "mission", sessionID: "doctor", arguments: "doctor" }, doctorOutput)
@@ -77,6 +89,23 @@ try {
   const resumedOut = { parts: [] }
   await hooks["command.execute.before"]({ command: "mission", sessionID: "s", arguments: "resume" }, resumedOut)
   assert.match(resumedOut.parts[0].text, /Mission resumed/)
+
+  const requirementResult = await hooks.tool.create_mission.execute({
+    objective: "Ship with evidence",
+    requirements: [{ id: "tests", text: "Tests pass" }],
+  }, { sessionID: "requirements" })
+  assert.equal(JSON.parse(requirementResult).mission.requirements[0].status, "open")
+  const verifyOutput = { parts: [] }
+  await hooks["command.execute.before"]({ command: "mission", sessionID: "requirements", arguments: "verify unit" }, verifyOutput)
+  assert.match(verifyOutput.parts[0].text, /unit: passed/)
+  const historyOutput = { parts: [] }
+  await hooks["command.execute.before"]({ command: "mission", sessionID: "requirements", arguments: "history" }, historyOutput)
+  assert.match(historyOutput.parts[0].text, /Mission history/)
+  const reportOutput = { parts: [] }
+  await hooks["command.execute.before"]({ command: "mission", sessionID: "requirements", arguments: "report" }, reportOutput)
+  assert.match(reportOutput.parts[0].text, /requirements/)
+  const completionResult = await hooks.tool.update_mission.execute({ status: "complete" }, { sessionID: "requirements" })
+  assert.equal(JSON.parse(completionResult).mission.status, "complete")
 
   console.log("server smoke: ok")
 } finally {

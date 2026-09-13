@@ -6,6 +6,12 @@ import test from "node:test"
 import {
   acquireSchedulerLease,
   accountMissionUsage,
+  addMissionEvidence,
+  getMissionHistory,
+  missionReport,
+  addMissionCheckpoint,
+  listMissionCheckpoints,
+  recordVerificationResult,
   cleanupStateDir,
   consumeContinuationDeferral,
   createMission,
@@ -14,6 +20,7 @@ import {
   extractAssistantUsage,
   missionPath,
   markBudgetWrapupSent,
+  markContinuationStarted,
   parseMissionCommand,
   pauseMission,
   readMission,
@@ -21,11 +28,13 @@ import {
   releaseSchedulerLease,
   renewSchedulerLease,
   resumeMission,
+  refreshMissionEvidence,
   seedMissionUsageBaselines,
   setMissionBudget,
   setStoppedStatus,
   snapshotMission,
   sleep,
+  writeMission,
 } from "../src/core.js"
 
 async function withState(fn) {
@@ -286,6 +295,11 @@ test("command parser supports /mission, alias payloads, budget and controls", ()
   assert.deepEqual(parseMissionCommand("--budget 12000 Ship it"), { op: "set", objective: "Ship it", tokenBudget: 12000 })
   assert.deepEqual(parseMissionCommand("pause waiting for user"), { op: "pause", reason: "waiting for user" })
   assert.deepEqual(parseMissionCommand("doctor"), { op: "doctor" })
+  assert.deepEqual(parseMissionCommand("verify unit"), { op: "verify", verificationID: "unit" })
+  assert.deepEqual(parseMissionCommand("history"), { op: "history" })
+  assert.deepEqual(parseMissionCommand("explain"), { op: "explain" })
+  assert.deepEqual(parseMissionCommand("report"), { op: "report" })
+  assert.deepEqual(parseMissionCommand("checkpoint before tests"), { op: "checkpoint", summary: "before tests" })
   assert.deepEqual(parseMissionCommand("budget off"), { op: "budget", tokenBudget: null })
   assert.deepEqual(parseMissionCommand("edit New objective"), { op: "edit", objective: "New objective" })
 })
@@ -400,5 +414,138 @@ test("scheduler lease permits one idempotent budget wrap-up", async () => {
     assert.equal(await acquireSchedulerLease(dir, "s", "other-owner", {
       expectedMissionID: mission.missionID,
     }), null)
+  })
+})
+
+test("runtime limits stop a Mission by automatic turns and no-progress turns", async () => {
+  await withState(async (dir) => {
+    const mission = await createMission(dir, "s", "Limited", null, {
+      maxAutomaticTurns: 2,
+      maxNoProgressTurns: 2,
+    })
+    const first = await markContinuationStarted(dir, "s", mission.missionID)
+    await recordMissionTurnOutcome(dir, "s", assistant("a", { parts: [] }), {
+      expectedMissionID: mission.missionID,
+      automatic: true,
+    })
+    const second = await markContinuationStarted(dir, "s", mission.missionID)
+    await recordMissionTurnOutcome(dir, "s", assistant("b", { parts: [] }), {
+      expectedMissionID: mission.missionID,
+      automatic: true,
+    })
+    const final = await readMission(dir, "s")
+    assert.equal(first.continuationCount, 1)
+    assert.equal(second.continuationCount, 2)
+    assert.equal(final.status, "usage_limited")
+    assert.match(final.stopReason, /automatic turn limit|no-progress/i)
+  })
+})
+
+test("active time limit is enforced when accounting a Mission", async () => {
+  await withState(async (dir) => {
+    const mission = await createMission(dir, "s", "Timed", null, { maxActiveSeconds: 1 })
+    const state = await readMission(dir, "s")
+    state.accumulatedActiveMs = 2_000
+    await writeMission(dir, state)
+    const updated = await accountMissionUsage(dir, "s", [], { expectedMissionID: mission.missionID })
+    assert.equal(updated.status, "usage_limited")
+    assert.match(updated.stopReason, /active time limit/i)
+  })
+})
+
+test("completion requires evidence for every declared requirement", async () => {
+  await withState(async (dir) => {
+    const mission = await createMission(dir, "s", "Verified", null, {
+      requirements: [
+        { id: "tests", text: "Tests pass" },
+        { id: "docs", text: "Documentation is updated" },
+      ],
+    })
+    await assert.rejects(
+      () => setStoppedStatus(dir, "s", "complete", "done", mission.missionID),
+      /requirements|evidence/i,
+    )
+    const withTests = await addMissionEvidence(dir, "s", "tests", {
+      kind: "command",
+      summary: "npm test: 10 passed",
+    }, mission.missionID)
+    assert.equal(withTests.requirements[0].status, "verified")
+    await assert.rejects(
+      () => setStoppedStatus(dir, "s", "complete", "done", mission.missionID),
+      /requirements|evidence/i,
+    )
+    await addMissionEvidence(dir, "s", "docs", {
+      kind: "inspection",
+      summary: "README reviewed",
+    }, mission.missionID)
+    const complete = await setStoppedStatus(dir, "s", "complete", "done", mission.missionID)
+    assert.equal(complete.status, "complete")
+    assert.equal(complete.requirements.every((requirement) => requirement.status === "verified"), true)
+  })
+})
+
+test("configured verification gates are persisted and record pass/fail evidence", async () => {
+  await withState(async (dir) => {
+    const mission = await createMission(dir, "s", "Verify", null, {
+      requirements: [{ id: "tests", text: "Tests pass" }],
+      verification: [{ id: "unit", command: "npm test", requirementID: "tests" }],
+    })
+    assert.deepEqual(mission.verification, [{ id: "unit", command: "npm test", requirementID: "tests" }])
+    const failed = await recordVerificationResult(dir, "s", "unit", {
+      passed: false,
+      summary: "npm test: 1 failed",
+    }, mission.missionID)
+    assert.equal(failed.requirements[0].status, "open")
+    const passed = await recordVerificationResult(dir, "s", "unit", {
+      passed: true,
+      summary: "npm test: all passed",
+    }, mission.missionID)
+    assert.equal(passed.requirements[0].status, "verified")
+  })
+})
+
+test("verification evidence becomes stale after the worktree fingerprint changes", async () => {
+  await withState(async (dir) => {
+    const mission = await createMission(dir, "s", "Fresh evidence", null, {
+      requirements: [{ id: "tests", text: "Tests pass" }],
+    })
+    await addMissionEvidence(dir, "s", "tests", {
+      kind: "command",
+      summary: "passed",
+      fingerprint: "tree-a",
+    }, mission.missionID)
+    let current = await readMission(dir, "s")
+    assert.equal(current.requirements[0].status, "verified")
+    current = await refreshMissionEvidence(dir, "s", "tree-b", mission.missionID)
+    assert.equal(current.requirements[0].status, "open")
+    assert.equal(current.requirements[0].evidence.at(-1).stale, true)
+  })
+})
+
+test("Mission journal and report explain lifecycle and missing requirements", async () => {
+  await withState(async (dir) => {
+    const mission = await createMission(dir, "s", "Report", null, {
+      requirements: [{ id: "tests", text: "Tests pass" }],
+    })
+    const history = await getMissionHistory(dir, "s")
+    assert.ok(history.some((event) => event.type === "created"))
+    const report = await missionReport(dir, "s")
+    assert.equal(report.status, "active")
+    assert.deepEqual(report.missingRequirements, ["tests"])
+    assert.ok(report.historyLength >= 1)
+  })
+})
+
+test("manual checkpoints persist bounded metadata without changing lifecycle", async () => {
+  await withState(async (dir) => {
+    const mission = await createMission(dir, "s", "Checkpoint")
+    const checkpoint = await addMissionCheckpoint(dir, "s", {
+      fingerprint: "tree-a",
+      commit: "abc123",
+      summary: "Before refactor",
+    }, mission.missionID)
+    assert.equal(checkpoint.status, "active")
+    assert.equal(checkpoint.checkpoints[0].fingerprint, "tree-a")
+    assert.equal((await listMissionCheckpoints(dir, "s")).length, 1)
   })
 })

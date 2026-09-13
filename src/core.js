@@ -21,9 +21,48 @@ const LOCK_HEARTBEAT_MS = 5_000
 const LOCK_RETRIES = 120
 const LOCK_RETRY_MS = 25
 const ACCOUNTING_ENTRY_LIMIT = 12_000
+const JOURNAL_ENTRY_LIMIT = 200
+const CHECKPOINT_ENTRY_LIMIT = 50
 // Codex wall-clock accounting is process-local (Instant-based). Clamp a restored
 // active Mission to this process start so application downtime is never billed.
 const PROCESS_STARTED_AT_MS = Date.now()
+
+function normalizeLimit(value) {
+  if (value === undefined || value === null || value === "") return null
+  const n = Number(value)
+  if (!Number.isSafeInteger(n) || n <= 0) throw new Error("Mission limits must be positive integers.")
+  return n
+}
+
+function enforceRuntimeLimits(mission, at = nowMs()) {
+  if (mission.status !== "active") return
+  const activeSeconds = Math.floor((mission.accumulatedActiveMs + (
+    mission.activeStartedAtMs == null ? 0 : Math.max(0, at - mission.activeStartedAtMs)
+  )) / 1000)
+  if (mission.limits.maxActiveSeconds != null && activeSeconds >= mission.limits.maxActiveSeconds) {
+    freezeClock(mission, at)
+    mission.status = "usage_limited"
+    mission.schedulerLease = null
+    mission.stopReason = "Runtime limit: active time limit reached"
+    mission.lastStatusChangeAtMs = at
+  }
+  if (mission.status === "active" && mission.limits.maxAutomaticTurns != null &&
+      mission.continuationCount >= mission.limits.maxAutomaticTurns) {
+    freezeClock(mission, at)
+    mission.status = "usage_limited"
+    mission.schedulerLease = null
+    mission.stopReason = "Runtime limit: automatic turn limit reached"
+    mission.lastStatusChangeAtMs = at
+  }
+  if (mission.status === "active" && mission.limits.maxNoProgressTurns != null &&
+      mission.runtime.noProgressStreak >= mission.limits.maxNoProgressTurns) {
+    freezeClock(mission, at)
+    mission.status = "usage_limited"
+    mission.schedulerLease = null
+    mission.stopReason = "Runtime limit: no-progress turn limit reached"
+    mission.lastStatusChangeAtMs = at
+  }
+}
 
 export function nowMs() {
   return Date.now()
@@ -143,9 +182,10 @@ function normalizeRuntime(value = {}) {
     emptyAutomaticStreak: Math.max(0, Number(value.emptyAutomaticStreak) || 0),
     failedExecStreak: Math.max(0, Number(value.failedExecStreak) || 0),
     evaluatedAssistantMessageIDs: evaluated,
-    lastAutomaticAssistantMessageID: value.lastAutomaticAssistantMessageID
+      lastAutomaticAssistantMessageID: value.lastAutomaticAssistantMessageID
       ? String(value.lastAutomaticAssistantMessageID)
-      : null,
+        : null,
+    noProgressStreak: Math.max(0, Number(value.noProgressStreak) || 0),
     lastTurnClassification: value.lastTurnClassification && typeof value.lastTurnClassification === "object"
       ? {
           automatic: Boolean(value.lastTurnClassification.automatic),
@@ -173,6 +213,58 @@ function normalizeSchedulerLease(value) {
   }
 }
 
+function normalizeRequirements(value) {
+  if (!Array.isArray(value)) return []
+  return value.map((item, index) => {
+    const id = String(item?.id || `requirement-${index + 1}`).trim()
+    const text = normalizeObjective(item?.text)
+    const evidence = Array.isArray(item?.evidence)
+      ? item.evidence.slice(-20).map((entry) => ({
+          kind: String(entry?.kind || "observation"),
+          summary: String(entry?.summary || "").trim().slice(0, 1000),
+          observedAtMs: Number(entry?.observedAtMs) || 0,
+          fingerprint: entry?.fingerprint ? String(entry.fingerprint) : null,
+          ...(entry?.stale ? { stale: true } : {}),
+          ...(entry?.passed === false ? { passed: false } : {}),
+        })).filter((entry) => entry.summary)
+      : []
+    const status = item?.status === "verified" || evidence.some((entry) => !entry.stale && entry.passed !== false)
+      ? "verified"
+      : "open"
+    return { id, text, status, evidence }
+  })
+}
+
+function normalizeVerification(value) {
+  if (!Array.isArray(value)) return []
+  return value.map((item, index) => ({
+    id: String(item?.id || `verification-${index + 1}`).trim(),
+    command: String(item?.command || "").trim().slice(0, 2000),
+    requirementID: item?.requirementID ? String(item.requirementID).trim() : null,
+  })).filter((item) => item.id && item.command)
+}
+
+function normalizeJournal(value) {
+  if (!Array.isArray(value)) return []
+  return value.slice(-JOURNAL_ENTRY_LIMIT).map((event, index) => ({
+    seq: Math.max(1, Math.floor(Number(event?.seq) || index + 1)),
+    type: String(event?.type || "unknown"),
+    atMs: Number(event?.atMs) || 0,
+    details: event?.details && typeof event.details === "object" ? event.details : {},
+  }))
+}
+
+function normalizeCheckpoints(value) {
+  if (!Array.isArray(value)) return []
+  return value.slice(-CHECKPOINT_ENTRY_LIMIT).map((item, index) => ({
+    id: String(item?.id || `checkpoint-${index + 1}`),
+    fingerprint: item?.fingerprint ? String(item.fingerprint) : null,
+    commit: item?.commit ? String(item.commit).slice(0, 200) : null,
+    summary: String(item?.summary || "").trim().slice(0, 1000),
+    createdAtMs: Number(item?.createdAtMs) || 0,
+  }))
+}
+
 export function normalizeMission(mission) {
   if (!mission || typeof mission !== "object") throw new Error("Invalid Mission state.")
   const status = MISSION_STATUSES.includes(mission.status) ? mission.status : "active"
@@ -190,6 +282,16 @@ export function normalizeMission(mission) {
     objective: normalizeObjective(mission.objective),
     status,
     tokenBudget: normalizeTokenBudget(mission.tokenBudget),
+    limits: {
+      maxAutomaticTurns: normalizeLimit(mission.limits?.maxAutomaticTurns),
+      maxActiveSeconds: normalizeLimit(mission.limits?.maxActiveSeconds),
+      maxNoProgressTurns: normalizeLimit(mission.limits?.maxNoProgressTurns),
+    },
+    requirements: normalizeRequirements(mission.requirements),
+    verification: normalizeVerification(mission.verification),
+    evidenceFingerprint: mission.evidenceFingerprint ? String(mission.evidenceFingerprint) : null,
+    journal: normalizeJournal(mission.journal),
+    checkpoints: normalizeCheckpoints(mission.checkpoints),
     tokensUsed: Math.max(0, Math.floor(Number(mission.tokensUsed) || 0)),
     rootTokensUsed: Math.max(0, Math.floor(Number(mission.rootTokensUsed) || 0)),
     descendantTokensUsed: Math.max(0, Math.floor(Number(mission.descendantTokensUsed) || 0)),
@@ -325,6 +427,11 @@ function ensureExpectedMission(mission, expectedMissionID) {
   return mission?.missionID === expectedMissionID
 }
 
+function appendJournal(mission, type, details = {}, at = nowMs()) {
+  const nextSeq = (mission.journal.at(-1)?.seq || 0) + 1
+  mission.journal = [...mission.journal, { seq: nextSeq, type, atMs: at, details }].slice(-JOURNAL_ENTRY_LIMIT)
+}
+
 export function snapshotMission(mission, at = nowMs()) {
   if (!mission) return null
   const m = normalizeMission(mission)
@@ -343,10 +450,13 @@ export function snapshotMission(mission, at = nowMs()) {
       timeUsedSeconds: m.timeUsedSeconds,
       continuationCount: m.continuationCount,
       schedulerLease: m.schedulerLease,
+      limits: m.limits,
+      requirements: m.requirements,
       stopReason: m.stopReason,
       runtime: {
         emptyAutomaticStreak: m.runtime.emptyAutomaticStreak,
         failedExecStreak: m.runtime.failedExecStreak,
+        noProgressStreak: m.runtime.noProgressStreak,
       },
     },
     remainingTokens,
@@ -362,7 +472,7 @@ export async function createMission(
   sessionID,
   objective,
   tokenBudget = null,
-  { maxTokenBudget = null, defaultTokenBudget = null } = {},
+  { maxTokenBudget = null, defaultTokenBudget = null, maxAutomaticTurns = null, maxActiveSeconds = null, maxNoProgressTurns = null, requirements = [], verification = [] } = {},
 ) {
   return withSessionLock(stateDir, sessionID, async () => {
     const existing = await readMission(stateDir, sessionID)
@@ -373,7 +483,16 @@ export async function createMission(
     }
     const requested = tokenBudget == null ? defaultTokenBudget : tokenBudget
     const budget = normalizeTokenBudget(requested, maxTokenBudget)
-    return writeMissionUnlocked(stateDir, newMission(sessionID, objective, budget))
+    const created = newMission(sessionID, objective, budget)
+    created.requirements = normalizeRequirements(requirements)
+    created.verification = normalizeVerification(verification)
+    appendJournal(created, "created", { objective: created.objective })
+    created.limits = {
+      maxAutomaticTurns: normalizeLimit(maxAutomaticTurns),
+      maxActiveSeconds: normalizeLimit(maxActiveSeconds),
+      maxNoProgressTurns: normalizeLimit(maxNoProgressTurns),
+    }
+    return writeMissionUnlocked(stateDir, created)
   })
 }
 
@@ -387,6 +506,7 @@ export async function editMission(stateDir, sessionID, objective, expectedMissio
     }
     mission.objective = normalizeObjective(objective)
     const at = nowMs()
+    appendJournal(mission, "objective_edited", {}, at)
     // Editing changes task data but does not silently alter lifecycle status.
     // In particular, budget_limited remains budget_limited until budget is changed and the user resumes.
     mission.updatedAtMs = at
@@ -433,6 +553,13 @@ export async function setStoppedStatus(
     const at = nowMs()
     refreshClock(mission, at)
 
+    if (status === "complete") {
+      const missing = mission.requirements.filter((requirement) => requirement.status !== "verified")
+      if (missing.length > 0) {
+        throw new Error(`Cannot complete Mission: missing evidence for ${missing.map((item) => item.id).join(", ")}.`)
+      }
+    }
+
     // Budget-limited takes precedence over pause/blocked, as in Codex.
     if (mission.status === "budget_limited" && (status === "paused" || status === "blocked")) {
       mission.updatedAtMs = at
@@ -445,6 +572,130 @@ export async function setStoppedStatus(
     mission.stopReason = reason
     mission.updatedAtMs = at
     mission.lastStatusChangeAtMs = at
+    appendJournal(mission, status, { reason }, at)
+    return writeMissionUnlocked(stateDir, mission)
+  })
+}
+
+export async function addMissionEvidence(
+  stateDir,
+  sessionID,
+  requirementID,
+  evidence,
+  expectedMissionID = null,
+) {
+  return withSessionLock(stateDir, sessionID, async () => {
+    const mission = await readMission(stateDir, sessionID)
+    if (!mission || !ensureExpectedMission(mission, expectedMissionID)) return null
+    const requirement = mission.requirements.find((item) => item.id === String(requirementID))
+    if (!requirement) throw new Error(`Unknown Mission requirement: ${requirementID}`)
+    const summary = String(evidence?.summary || "").trim()
+    if (!summary) throw new Error("Mission evidence summary cannot be empty.")
+    requirement.evidence = [...requirement.evidence, {
+      kind: String(evidence?.kind || "observation"),
+      summary: summary.slice(0, 1000),
+      observedAtMs: Number(evidence?.observedAtMs) || nowMs(),
+      fingerprint: evidence?.fingerprint ? String(evidence.fingerprint) : null,
+    }].slice(-20)
+    requirement.status = "verified"
+    if (evidence?.fingerprint) mission.evidenceFingerprint = String(evidence.fingerprint)
+    appendJournal(mission, "evidence_added", { requirementID: requirement.id, kind: evidence?.kind || "observation" })
+    mission.updatedAtMs = nowMs()
+    return writeMissionUnlocked(stateDir, mission)
+  })
+}
+
+export async function refreshMissionEvidence(stateDir, sessionID, fingerprint, expectedMissionID = null) {
+  return withSessionLock(stateDir, sessionID, async () => {
+    const mission = await readMission(stateDir, sessionID)
+    if (!mission || !ensureExpectedMission(mission, expectedMissionID)) return null
+    const value = String(fingerprint || "")
+    if (value && mission.evidenceFingerprint && value !== mission.evidenceFingerprint) {
+      for (const requirement of mission.requirements) {
+        for (const evidence of requirement.evidence) evidence.stale = true
+        requirement.status = "open"
+      }
+      appendJournal(mission, "evidence_stale", { previous: mission.evidenceFingerprint, current: value })
+    }
+    mission.evidenceFingerprint = value || mission.evidenceFingerprint
+    mission.updatedAtMs = nowMs()
+    return writeMissionUnlocked(stateDir, mission)
+  })
+}
+
+export async function getMissionHistory(stateDir, sessionID) {
+  const mission = await readMission(stateDir, sessionID)
+  return mission?.journal || []
+}
+
+export async function missionReport(stateDir, sessionID) {
+  const mission = await readMission(stateDir, sessionID)
+  if (!mission) return null
+  return {
+    missionID: mission.missionID,
+    objective: mission.objective,
+    status: mission.status,
+    stopReason: mission.stopReason,
+    tokensUsed: mission.tokensUsed,
+    timeUsedSeconds: mission.timeUsedSeconds,
+    requirements: mission.requirements,
+    missingRequirements: mission.requirements.filter((item) => item.status !== "verified").map((item) => item.id),
+    historyLength: mission.journal.length,
+    checkpoints: mission.checkpoints,
+  }
+}
+
+export async function addMissionCheckpoint(stateDir, sessionID, checkpoint, expectedMissionID = null) {
+  return withSessionLock(stateDir, sessionID, async () => {
+    const mission = await readMission(stateDir, sessionID)
+    if (!mission || !ensureExpectedMission(mission, expectedMissionID)) return null
+    const summary = String(checkpoint?.summary || "").trim()
+    if (!summary) throw new Error("Mission checkpoint summary cannot be empty.")
+    const createdAtMs = Number(checkpoint?.createdAtMs) || nowMs()
+    mission.checkpoints = [...mission.checkpoints, {
+      id: String(checkpoint?.id || randomUUID()),
+      fingerprint: checkpoint?.fingerprint ? String(checkpoint.fingerprint) : null,
+      commit: checkpoint?.commit ? String(checkpoint.commit).slice(0, 200) : null,
+      summary: summary.slice(0, 1000),
+      createdAtMs,
+    }].slice(-CHECKPOINT_ENTRY_LIMIT)
+    appendJournal(mission, "checkpoint_created", { summary: summary.slice(0, 200) }, createdAtMs)
+    mission.updatedAtMs = nowMs()
+    return writeMissionUnlocked(stateDir, mission)
+  })
+}
+
+export async function listMissionCheckpoints(stateDir, sessionID) {
+  const mission = await readMission(stateDir, sessionID)
+  return mission?.checkpoints || []
+}
+
+export async function recordVerificationResult(
+  stateDir,
+  sessionID,
+  verificationID,
+  result,
+  expectedMissionID = null,
+) {
+  return withSessionLock(stateDir, sessionID, async () => {
+    const mission = await readMission(stateDir, sessionID)
+    if (!mission || !ensureExpectedMission(mission, expectedMissionID)) return null
+    const gate = mission.verification.find((item) => item.id === String(verificationID))
+    if (!gate) throw new Error(`Unknown Mission verification gate: ${verificationID}`)
+    const summary = String(result?.summary || "").trim()
+    if (!summary) throw new Error("Verification result summary cannot be empty.")
+    if (gate.requirementID) {
+      const requirement = mission.requirements.find((item) => item.id === gate.requirementID)
+      if (!requirement) throw new Error(`Verification gate references unknown requirement: ${gate.requirementID}`)
+      requirement.evidence = [...requirement.evidence, {
+      kind: "verification",
+      summary: summary.slice(0, 1000),
+      observedAtMs: Number(result?.observedAtMs) || nowMs(),
+      ...(result?.passed === false ? { passed: false } : {}),
+      }].slice(-20)
+      requirement.status = result?.passed === true ? "verified" : "open"
+    }
+    mission.updatedAtMs = nowMs()
     return writeMissionUnlocked(stateDir, mission)
   })
 }
@@ -471,6 +722,7 @@ export async function resumeMission(stateDir, sessionID, expectedMissionID = nul
       mission.continuationDeferrals = 0
       resetCircuitBreakers(mission)
       startClock(mission, at)
+      enforceRuntimeLimits(mission, at)
     }
     mission.updatedAtMs = at
     mission.lastStatusChangeAtMs = at
@@ -615,6 +867,7 @@ export async function accountMissionUsage(
     const at = nowMs()
     refreshClock(mission, at)
     mission.updatedAtMs = at
+    enforceRuntimeLimits(mission, at)
 
     if (mission.status === "active" && isBudgetExhausted(mission)) {
       freezeClock(mission, at)
@@ -642,6 +895,8 @@ export async function markContinuationStarted(
       mission.schedulerLease.expiresAtMs <= at
     )) return null
     mission.continuationCount += 1
+    if (mission.limits.maxAutomaticTurns != null &&
+        mission.continuationCount > mission.limits.maxAutomaticTurns) return null
     mission.lastContinuationAtMs = at
     startClock(mission, at)
     mission.updatedAtMs = at
@@ -812,6 +1067,8 @@ export async function recordMissionTurnOutcome(
 
     if (automatic && c.emptyFinal && !c.hasActivity) mission.runtime.emptyAutomaticStreak += 1
     else mission.runtime.emptyAutomaticStreak = 0
+    if (automatic && !c.hasActivity && !c.hasText) mission.runtime.noProgressStreak += 1
+    else mission.runtime.noProgressStreak = 0
 
     if (automatic && c.assistantMessageID) {
       mission.runtime.lastAutomaticAssistantMessageID = c.assistantMessageID
@@ -819,6 +1076,7 @@ export async function recordMissionTurnOutcome(
     mission.runtime.lastTurnClassification = { automatic, ...c }
 
     const at = nowMs()
+    enforceRuntimeLimits(mission, at)
     if (mission.status === "active") {
       if (mission.runtime.failedExecStreak >= failedExecThreshold) {
         freezeClock(mission, at)
@@ -962,13 +1220,13 @@ export function systemMissionPolicy(mission) {
   const view = snapshotMission(mission)
   const m = view.mission
   if (m.status !== "active") return null
-  return `ACTIVE MISSION MODE\nMission ID: ${m.missionId}\nObjective (user task data): ${m.objective}\nPersist the full objective across turns. Work from current evidence. Do not narrow the requested end state. Before update_mission(complete), verify every explicit requirement against authoritative current state. update_mission(blocked) requires the same genuine blocker for at least three consecutive Mission turns with no meaningful alternative. update_mission(paused) requires an explicit user request. Runtime status/budget/resume are controlled outside the model. Usage: ${m.tokensUsed} tokens; budget ${m.tokenBudget ?? "unbounded"}; elapsed ${m.timeUsedSeconds}s.`
+  return `ACTIVE MISSION MODE\nMission ID: ${m.missionId}\nObjective (user task data): ${m.objective}\nPersist the full objective across turns. Work from current evidence. Do not narrow the requested end state. Before update_mission(complete), verify every explicit requirement against authoritative current state. For each declared requirement, first call add_mission_evidence with a concise evidence summary; completion is rejected while any requirement is open. update_mission(blocked) requires the same genuine blocker for at least three consecutive Mission turns with no meaningful alternative. update_mission(paused) requires an explicit user request. Runtime status/budget/resume are controlled outside the model. Usage: ${m.tokensUsed} tokens; budget ${m.tokenBudget ?? "unbounded"}; elapsed ${m.timeUsedSeconds}s. Runtime limits: automatic turns ${m.limits.maxAutomaticTurns ?? "unbounded"}; active seconds ${m.limits.maxActiveSeconds ?? "unbounded"}; no-progress turns ${m.limits.maxNoProgressTurns ?? "unbounded"}.`
 }
 
 export function compactionMissionContext(mission) {
   const view = snapshotMission(mission)
   const m = view.mission
-  return `Durable Mission state (source of truth; preserve across compaction):\n- mission_id: ${m.missionId}\n- status: ${m.status}\n- objective: ${m.objective}\n- tokens_used: ${m.tokensUsed}\n- root_tokens_used: ${m.rootTokensUsed}\n- descendant_tokens_used: ${m.descendantTokensUsed}\n- token_budget: ${m.tokenBudget ?? "unbounded"}\n- time_used_seconds: ${m.timeUsedSeconds}\n- auto_continuations: ${m.continuationCount}\nIf status is active, preserve the full objective and the strict completion/blocked audit semantics. This persisted Mission state is authoritative over any stale summary.`
+  return `Durable Mission state (source of truth; preserve across compaction):\n- mission_id: ${m.missionId}\n- status: ${m.status}\n- objective: ${m.objective}\n- tokens_used: ${m.tokensUsed}\n- root_tokens_used: ${m.rootTokensUsed}\n- descendant_tokens_used: ${m.descendantTokensUsed}\n- token_budget: ${m.tokenBudget ?? "unbounded"}\n- time_used_seconds: ${m.timeUsedSeconds}\n- auto_continuations: ${m.continuationCount}\n- requirements: ${m.requirements.filter((item) => item.status === "verified").length}/${m.requirements.length} verified\nIf status is active, preserve the full objective and the strict completion/blocked audit semantics. This persisted Mission state is authoritative over any stale summary.`
 }
 
 function parseLeadingBudget(text) {
@@ -991,6 +1249,11 @@ export function parseMissionCommand(raw) {
   if (command === "status" || command === "view") return { op: "view" }
   if (command === "help") return { op: "help" }
   if (command === "doctor") return { op: "doctor" }
+  if (command === "verify") return { op: "verify", verificationID: tail || null }
+  if (command === "history") return { op: "history" }
+  if (command === "explain") return { op: "explain" }
+  if (command === "report") return { op: "report" }
+  if (command === "checkpoint") return { op: "checkpoint", summary: tail || null }
   if (command === "pause") return { op: "pause", reason: tail || null }
   if (command === "resume") return { op: "resume" }
   if (command === "clear") return { op: "clear" }
@@ -1020,7 +1283,9 @@ export function conciseStatus(mission) {
     `Token split: root ${m.rootTokensUsed.toLocaleString("en-US")}, descendants ${m.descendantTokensUsed.toLocaleString("en-US")}`,
     `Elapsed: ${m.timeUsedSeconds}s`,
     `Continuations: ${m.continuationCount}`,
-    `Runtime streaks: empty-auto ${m.runtime.emptyAutomaticStreak}, failed-exec ${m.runtime.failedExecStreak}`,
+    `Runtime streaks: empty-auto ${m.runtime.emptyAutomaticStreak}, failed-exec ${m.runtime.failedExecStreak}, no-progress ${m.runtime.noProgressStreak}`,
+    `Requirements: ${m.requirements.filter((item) => item.status === "verified").length}/${m.requirements.length} verified`,
+    `Limits: automatic turns ${m.limits.maxAutomaticTurns ?? "unbounded"}, active seconds ${m.limits.maxActiveSeconds ?? "unbounded"}, no-progress turns ${m.limits.maxNoProgressTurns ?? "unbounded"}`,
     m.stopReason ? `Stop reason: ${m.stopReason}` : null,
   ].filter(Boolean).join("\n")
 }
@@ -1035,6 +1300,11 @@ export function missionHelp(commandName = "mission", alias = "msn") {
     `/${commandName} resume                      Resume a paused/blocked Mission`,
     `/${commandName} budget <N|off>              Change budget (does not auto-resume)`,
     `/${commandName} doctor                      Diagnose state and OpenCode APIs`,
+    `/${commandName} verify [gate-id]            Run configured verification gate(s)`,
+    `/${commandName} history                     Show lifecycle event history`,
+    `/${commandName} explain                     Explain persisted Mission decisions`,
+    `/${commandName} report                      Show an exportable Mission report`,
+    `/${commandName} checkpoint [summary]         Save a manual worktree checkpoint`,
     `/${commandName} clear                       Remove persisted Mission state`,
     alias ? `/${alias} ...                              Short alias` : null,
   ].filter(Boolean).join("\n")

@@ -1,6 +1,10 @@
 import { tool } from "@opencode-ai/plugin"
+import { execFile } from "node:child_process"
+import { promisify } from "node:util"
 import {
   accountMissionUsage,
+  addMissionCheckpoint,
+  addMissionEvidence,
   acquireSchedulerLease,
   budgetLimitPrompt,
   compactionMissionContext,
@@ -14,6 +18,9 @@ import {
   markBudgetWrapupSent,
   markContinuationStarted,
   missionHelp,
+  getMissionHistory,
+  missionReport,
+  refreshMissionEvidence,
   newSchedulerOwnerID,
   objectiveUpdatedPrompt,
   parseMissionCommand,
@@ -21,6 +28,7 @@ import {
   publicMissionJSON,
   readMission,
   recordMissionTurnOutcome,
+  recordVerificationResult,
   releaseSchedulerLease,
   renewSchedulerLease,
   resumeMission,
@@ -38,6 +46,7 @@ const DEFAULT_COMMAND = "mission"
 const DEFAULT_ALIAS = "msn"
 const continuationInFlight = new Set()
 const continuationRechecks = new Map()
+const execFileAsync = promisify(execFile)
 
 function unwrapData(value) {
   return value?.data ?? value
@@ -187,6 +196,21 @@ function integerOption(options, name, fallback, minimum) {
   return value
 }
 
+function normalizeVerificationOptions(value) {
+  if (value === undefined || value === null) return []
+  if (!Array.isArray(value)) throw new Error("verification must be an array")
+  return value.map((item, index) => {
+    const id = String(item?.id || `verification-${index + 1}`).trim()
+    const command = String(item?.command || "").trim()
+    if (!id || !command) throw new Error("verification entries require non-empty id and command")
+    return {
+      id,
+      command,
+      requirementID: item?.requirementID == null ? null : String(item.requirementID).trim(),
+    }
+  })
+}
+
 export function normalizePluginOptions(options = {}) {
   if (!options || typeof options !== "object" || Array.isArray(options)) {
     throw new Error("Mission plugin options must be an object")
@@ -218,6 +242,10 @@ export function normalizePluginOptions(options = {}) {
     descendant_max_depth: integerOption(options, "descendant_max_depth", 6, 0),
     descendant_max_sessions: integerOption(options, "descendant_max_sessions", 96, 1),
     scheduler_lease_ms: integerOption(options, "scheduler_lease_ms", 30_000, 1_000),
+    max_automatic_turns: integerOption(options, "max_automatic_turns", null, 1),
+    max_active_seconds: integerOption(options, "max_active_seconds", null, 1),
+    max_no_progress_turns: integerOption(options, "max_no_progress_turns", null, 1),
+    verification: normalizeVerificationOptions(options.verification),
     exec_tool_names: options.exec_tool_names?.map((name) => name.trim()),
   })
 }
@@ -244,11 +272,40 @@ async function missionDiagnostics(client, stateDir, sessionID) {
   return `Mission diagnostics\n${checks.map((check) => `- ${check}`).join("\n")}`
 }
 
-async function handleSlashCommand(client, stateDir, sessionID, rawArguments, options) {
+async function executeVerificationGate($, cwd, stateDir, sessionID, mission, gate) {
+  if (typeof $ !== "function") throw new Error("Verification execution is unavailable in this OpenCode runtime.")
+  const result = await $.cwd(cwd || process.cwd()).nothrow()`${{ raw: gate.command }}`
+  const fingerprint = await getWorktreeFingerprint(cwd)
+  mission = await refreshMissionEvidence(stateDir, sessionID, fingerprint, mission.missionID) || mission
+  const output = String(result?.stdout || result?.stderr || result || "").trim()
+  const passed = Number(result?.exitCode ?? result?.exit_code ?? 1) === 0
+  const updated = await recordVerificationResult(stateDir, sessionID, gate.id, {
+    passed,
+    summary: `${gate.command}: ${passed ? "passed" : "failed"}${output ? ` — ${output.slice(0, 700)}` : ""}`,
+    fingerprint,
+  }, mission.missionID)
+  if (!updated) throw new Error("Mission changed concurrently; verification result rejected.")
+  return { updated, passed, output }
+}
+
+async function getWorktreeFingerprint(cwd) {
+  try {
+    const { stdout } = await execFileAsync("git", ["rev-parse", "HEAD"], { cwd: cwd || process.cwd() })
+    const { stdout: status } = await execFileAsync("git", ["status", "--porcelain=v1"], { cwd: cwd || process.cwd() })
+    return `${stdout.trim()}|${status}`.slice(0, 4000)
+  } catch {
+    return null
+  }
+}
+
+async function handleSlashCommand(client, $, workspaceDirectory, stateDir, sessionID, rawArguments, options) {
   const parsed = parseMissionCommand(rawArguments)
   const maxBudget = getConfiguredMaxBudget(options)
   // Codex uses max_goal_token_budget as both the default and maximum for a newly-created Goal.
   const createOptions = { maxTokenBudget: maxBudget, defaultTokenBudget: maxBudget }
+  createOptions.maxAutomaticTurns = options.max_automatic_turns
+  createOptions.maxActiveSeconds = options.max_active_seconds
+  createOptions.maxNoProgressTurns = options.max_no_progress_turns
 
   if (parsed.op === "view") {
     const mission = await readMission(stateDir, sessionID)
@@ -264,6 +321,44 @@ async function handleSlashCommand(client, stateDir, sessionID, rawArguments, opt
 
   if (parsed.op === "doctor") {
     return commandResultPrompt(await missionDiagnostics(client, stateDir, sessionID), null, false)
+  }
+
+  if (parsed.op === "history" || parsed.op === "explain" || parsed.op === "report") {
+    if (parsed.op === "report") return commandResultPrompt(JSON.stringify(await missionReport(stateDir, sessionID), null, 2), null, false)
+    const history = await getMissionHistory(stateDir, sessionID)
+    const text = parsed.op === "explain"
+      ? `Mission decisions\n${history.map((event) => `- #${event.seq} ${event.type}: ${JSON.stringify(event.details)}`).join("\n") || "- no events"}`
+      : `Mission history\n${history.map((event) => `- #${event.seq} ${event.type} @ ${new Date(event.atMs).toISOString()}`).join("\n") || "- no events"}`
+    return commandResultPrompt(text, null, false)
+  }
+
+  if (parsed.op === "verify") {
+    let mission = await readMission(stateDir, sessionID)
+    if (!mission) throw new Error("No Mission exists for this session.")
+    const gates = parsed.verificationID
+      ? mission.verification.filter((gate) => gate.id === parsed.verificationID)
+      : mission.verification
+    if (gates.length === 0) throw new Error(parsed.verificationID
+      ? `Unknown Mission verification gate: ${parsed.verificationID}`
+      : "No verification gates are configured for this Mission.")
+    const results = []
+    for (const gate of gates) {
+      const result = await executeVerificationGate($, workspaceDirectory, stateDir, sessionID, mission, gate)
+      mission = result.updated
+      results.push(`${gate.id}: ${result.passed ? "passed" : "failed"}`)
+    }
+    return commandResultPrompt(`Mission verification\n${results.map((result) => `- ${result}`).join("\n")}`, mission, false)
+  }
+
+  if (parsed.op === "checkpoint") {
+    const mission = await readMission(stateDir, sessionID)
+    if (!mission) throw new Error("No Mission exists for this session.")
+    const fingerprint = await getWorktreeFingerprint(workspaceDirectory)
+    const result = await addMissionCheckpoint(stateDir, sessionID, {
+      fingerprint,
+      summary: parsed.summary || "Manual checkpoint",
+    }, mission.missionID)
+    return commandResultPrompt(`Mission checkpoint created\n${JSON.stringify(result.checkpoints.at(-1), null, 2)}`, result, false)
   }
 
   if (parsed.op === "set") {
@@ -513,7 +608,7 @@ function completionResponse(mission) {
   }, null, 2)
 }
 
-export const MissionPlugin = async ({ client }, rawOptions = {}) => {
+export const MissionPlugin = async ({ client, $, directory }, rawOptions = {}) => {
   const options = normalizePluginOptions(rawOptions)
   const stateDir = options.state_dir ? String(options.state_dir) : defaultStateDir()
   const commandName = String(options.command_name || DEFAULT_COMMAND)
@@ -572,6 +667,10 @@ export const MissionPlugin = async ({ client }, rawOptions = {}) => {
             .positive()
             .optional()
             .describe("Optional positive token budget. Omit unless explicitly requested."),
+          requirements: tool.schema.array(tool.schema.object({
+            id: tool.schema.string().min(1),
+            text: tool.schema.string().min(1).max(1000),
+          })).optional().describe("Optional acceptance requirements that must have evidence before completion."),
         },
         async execute(args, context) {
           let mission = await createMission(
@@ -579,7 +678,7 @@ export const MissionPlugin = async ({ client }, rawOptions = {}) => {
             context.sessionID,
             args.objective,
             args.token_budget ?? null,
-            { maxTokenBudget: maxBudget, defaultTokenBudget: maxBudget },
+            { maxTokenBudget: maxBudget, defaultTokenBudget: maxBudget, requirements: args.requirements, verification: options.verification },
           )
           const baselineSamples = await collectUsageSamples(client, context.sessionID, {
             maxDepth: Math.max(0, Number(options?.descendant_max_depth ?? 6)),
@@ -619,6 +718,50 @@ export const MissionPlugin = async ({ client }, rawOptions = {}) => {
           return args.status === "complete" ? completionResponse(mission) : publicMissionJSON(mission)
         },
       }),
+      add_mission_evidence: tool({
+        description: "Attach concise authoritative evidence to a declared Mission requirement. This does not complete or resume a Mission.",
+        args: {
+          requirement_id: tool.schema.string().min(1),
+          kind: tool.schema.string().min(1).max(100).optional(),
+          summary: tool.schema.string().min(1).max(1000),
+        },
+        async execute(args, context) {
+          const mission = await readMission(stateDir, context.sessionID)
+          if (!mission) throw new Error("No Mission exists for this session.")
+          const updated = await addMissionEvidence(stateDir, context.sessionID, args.requirement_id, {
+            kind: args.kind,
+            summary: args.summary,
+          }, mission.missionID)
+          if (!updated) throw new Error("Mission changed concurrently; evidence update rejected.")
+          return publicMissionJSON(updated)
+        },
+      }),
+      verify_mission_gate: tool({
+        description: "Run a configured Mission verification gate from trusted plugin configuration.",
+        args: { verification_id: tool.schema.string().min(1) },
+        async execute(args, context) {
+          const mission = await readMission(stateDir, context.sessionID)
+          const gate = mission?.verification.find((item) => item.id === args.verification_id)
+          if (!mission || !gate) throw new Error(`Unknown Mission verification gate: ${args.verification_id}`)
+          if (typeof $ !== "function") throw new Error("Verification execution is unavailable in this OpenCode runtime.")
+          const result = await executeVerificationGate($, context.directory || directory, stateDir, context.sessionID, mission, gate)
+          return publicMissionJSON(result.updated)
+        },
+      }),
+      create_mission_checkpoint: tool({
+        description: "Save manual checkpoint metadata for the current Mission without committing or rolling back files.",
+        args: { summary: tool.schema.string().min(1).max(1000) },
+        async execute(args, context) {
+          const mission = await readMission(stateDir, context.sessionID)
+          if (!mission) throw new Error("No Mission exists for this session.")
+          const result = await addMissionCheckpoint(stateDir, context.sessionID, {
+            summary: args.summary,
+            fingerprint: await getWorktreeFingerprint(context.worktree || directory),
+          }, mission.missionID)
+          if (!result) throw new Error("Mission changed concurrently; checkpoint rejected.")
+          return publicMissionJSON(result)
+        },
+      }),
     },
 
     "tool.execute.after": async (input) => {
@@ -645,7 +788,7 @@ export const MissionPlugin = async ({ client }, rawOptions = {}) => {
     "command.execute.before": async (input, output) => {
       if (input.command !== commandName && input.command !== aliasName) return
       try {
-        const prompt = await handleSlashCommand(client, stateDir, input.sessionID, input.arguments, options)
+        const prompt = await handleSlashCommand(client, $, directory, stateDir, input.sessionID, input.arguments, options)
         // OpenCode keeps the original parts array; mutate it in place.
         output.parts.splice(0, output.parts.length, { type: "text", text: prompt, synthetic: true })
       } catch (error) {

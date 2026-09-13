@@ -102,7 +102,10 @@ OpenCode's plugin API also accepts an options tuple. Example:
       {
         "max_mission_token_budget": 200000,
         "auto_continue": true,
-        "min_continue_interval_ms": 250
+        "min_continue_interval_ms": 250,
+        "verification": [
+          { "id": "tests", "command": "npm test", "requirementID": "tests" }
+        ]
       }
     ]
   ]
@@ -182,6 +185,10 @@ Show command help.
 ## Model tools
 
 Mission registers three tools, intentionally mirroring the authority split of Codex Goal:
+
+When `create_mission` receives explicit acceptance requirements, Mission persists them and exposes
+`add_mission_evidence`. Every declared requirement must have evidence before the model can mark the
+Mission complete. Missions without declared requirements retain the existing completion policy.
 
 ### `get_mission`
 
@@ -407,9 +414,22 @@ Each session has one JSON state file. Writes use a per-session file lock plus te
 | `descendant_max_depth` | `6` | Maximum depth of child-session traversal for usage accounting |
 | `descendant_max_sessions` | `96` | Safety cap on traversed sessions per accounting pass |
 | `scheduler_lease_ms` | `30000` | Persisted continuation ownership lease; minimum 1000 ms |
+| `max_automatic_turns` | none | Runtime limit for automatic physical turns per Mission |
+| `max_active_seconds` | none | Runtime limit for active wall-clock seconds |
+| `max_no_progress_turns` | none | Runtime limit for consecutive automatic turns with no activity or final text |
 | `state_dir` | platform state dir | Override persisted Mission directory |
 | `command_name` | `mission` | Main slash command |
 | `alias` | `msn` | Short slash alias; set `false` to disable |
+| `verification` | `[]` | Trusted verification gates; commands are never read from Mission objective data |
+
+Configured gates run explicitly with `/mission verify` or `/mission verify <gate-id>`. They execute
+in the current OpenCode project directory and record pass/fail evidence for the linked requirement.
+Verification is not started automatically by continuation.
+
+Verification evidence includes a best-effort worktree fingerprint made from `git HEAD` and
+`git status --porcelain`. When the fingerprint changes, previous evidence becomes stale and the
+linked requirement must be verified again. Use `/mission checkpoint [summary]` to save bounded
+checkpoint metadata without creating commits or rolling files back.
 
 ## Source layout
 

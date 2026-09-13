@@ -59,7 +59,24 @@ recoverable after `scheduler_lease_ms` (30 seconds by default). A later `session
 then acquire the expired lease. Do not place the state directory on a shared network filesystem;
 the lock and lease guarantees target processes on one host with a shared local state directory.
 
+Run configured verification gates explicitly with `/mission verify` or `/mission verify <gate-id>`.
+Gate commands come from trusted plugin configuration and execute in the current project directory.
+A failed gate leaves its linked requirement open.
+
+Use `/mission checkpoint [summary]` before a risky phase to save a manual metadata marker. This is
+not a Git commit and does not provide automatic rollback. If a later verification reports stale
+evidence, rerun the affected gate after the worktree reaches the intended state.
+
 Do not mark a Mission active by hand in JSON while a previous turn may still be finishing.
+
+Runtime limits can be configured with `max_automatic_turns`, `max_active_seconds`, and
+`max_no_progress_turns`. A reached limit produces `usage_limited` with a specific stop reason.
+Changing token budget does not remove these limits; update configuration and explicitly resume only
+after confirming the Mission should continue.
+
+For evidence-backed Missions, inspect `/mission status` before completion. The status output shows
+the number of verified requirements. A model must use `add_mission_evidence` for each declared
+requirement; a completion request with missing evidence is rejected and leaves the Mission active.
 
 ## Budget limited
 
