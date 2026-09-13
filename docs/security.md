@@ -18,8 +18,10 @@ local application data:
 - restrict access to the user account where supported;
 - preserve a copy before manual recovery.
 
-The implementation uses per-session lock files and temporary-file plus rename writes. These reduce
-partial-write and concurrent-mutation risks but do not provide encryption or multi-host locking.
+The implementation uses per-session lock files with an owner token, heartbeat timestamps, and
+temporary-file plus rename writes. These reduce partial-write and concurrent-mutation risks but do
+not provide encryption or multi-host locking. A corrupt state file is quarantined rather than
+silently discarded.
 
 ## Plugin permissions
 

@@ -132,6 +132,15 @@ Start with an explicit token budget.
 Show current Mission state.
 
 ```text
+/mission doctor
+```
+
+Diagnose persisted state and the OpenCode message/child-session APIs. Invalid plugin options fail
+at startup instead of being silently coerced. A malformed JSON state file is moved into the
+`corrupt/` directory under the configured state directory and reported as an error rather than
+being treated as an absent Mission.
+
+```text
 /mission edit <new objective>
 ```
 
@@ -384,7 +393,7 @@ Override:
 OPENCODE_MISSION_STATE_DIR=/some/path
 ```
 
-Each session has one JSON state file. Writes use a per-session file lock plus temporary-file rename. Stale locks are recoverable after a timeout.
+Each session has one JSON state file. Writes use a per-session file lock plus temporary-file rename. Stale locks are recoverable after a timeout. Automatic continuation also uses a persisted owner lease, preventing two OpenCode plugin processes that share the same local state directory from starting the same physical turn.
 
 ## Plugin options
 
@@ -397,6 +406,7 @@ Each session has one JSON state file. Writes use a per-session file lock plus te
 | `empty_auto_threshold` | `3` | Consecutive empty automatic continuations before runtime block |
 | `descendant_max_depth` | `6` | Maximum depth of child-session traversal for usage accounting |
 | `descendant_max_sessions` | `96` | Safety cap on traversed sessions per accounting pass |
+| `scheduler_lease_ms` | `30000` | Persisted continuation ownership lease; minimum 1000 ms |
 | `state_dir` | platform state dir | Override persisted Mission directory |
 | `command_name` | `mission` | Main slash command |
 | `alias` | `msn` | Short slash alias; set `false` to disable |

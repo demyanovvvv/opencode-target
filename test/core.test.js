@@ -1,9 +1,10 @@
 import assert from "node:assert/strict"
-import { mkdtemp } from "node:fs/promises"
+import { mkdir, mkdtemp, readdir, writeFile } from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
 import test from "node:test"
 import {
+  acquireSchedulerLease,
   accountMissionUsage,
   cleanupStateDir,
   consumeContinuationDeferral,
@@ -11,10 +12,14 @@ import {
   deferNextContinuation,
   editMission,
   extractAssistantUsage,
+  missionPath,
+  markBudgetWrapupSent,
   parseMissionCommand,
   pauseMission,
   readMission,
   recordMissionTurnOutcome,
+  releaseSchedulerLease,
+  renewSchedulerLease,
   resumeMission,
   seedMissionUsageBaselines,
   setMissionBudget,
@@ -280,6 +285,7 @@ test("command parser supports /mission, alias payloads, budget and controls", ()
   assert.deepEqual(parseMissionCommand("Ship it"), { op: "set", objective: "Ship it", tokenBudget: null })
   assert.deepEqual(parseMissionCommand("--budget 12000 Ship it"), { op: "set", objective: "Ship it", tokenBudget: 12000 })
   assert.deepEqual(parseMissionCommand("pause waiting for user"), { op: "pause", reason: "waiting for user" })
+  assert.deepEqual(parseMissionCommand("doctor"), { op: "doctor" })
   assert.deepEqual(parseMissionCommand("budget off"), { op: "budget", tokenBudget: null })
   assert.deepEqual(parseMissionCommand("edit New objective"), { op: "edit", objective: "New objective" })
 })
@@ -295,5 +301,104 @@ test("snapshot exposes remaining budget and root/descendant split", async () => 
     assert.equal(view.mission.rootTokensUsed, 90)
     assert.equal(view.mission.descendantTokensUsed, 60)
     assert.equal(view.remainingTokens, 850)
+  })
+})
+
+test("corrupt persisted state is quarantined instead of being treated as absent", async () => {
+  await withState(async (dir) => {
+    const file = missionPath(dir, "s")
+    await mkdir(path.dirname(file), { recursive: true })
+    await writeFile(file, "{not-json", "utf8")
+    await assert.rejects(() => readMission(dir, "s"), /corrupt|invalid/i)
+    const quarantined = await readdir(path.join(dir, "corrupt"))
+    assert.equal(quarantined.length, 1)
+    assert.match(quarantined[0], /cw\.json\./)
+  })
+})
+
+test("schema-invalid persisted state is quarantined", async () => {
+  await withState(async (dir) => {
+    const file = missionPath(dir, "s")
+    await mkdir(path.dirname(file), { recursive: true })
+    await writeFile(file, JSON.stringify({ sessionID: "s", objective: "" }), "utf8")
+    await assert.rejects(() => readMission(dir, "s"), { code: "MISSION_STATE_CORRUPT" })
+    assert.equal((await readdir(path.join(dir, "corrupt"))).length, 1)
+  })
+})
+
+test("scheduler lease has exclusive ownership and may be recovered after expiry", async () => {
+  await withState(async (dir) => {
+    const mission = await createMission(dir, "s", "Lease guarded continuation")
+    const first = await acquireSchedulerLease(dir, "s", "owner-a", {
+      expectedMissionID: mission.missionID,
+      leaseMs: 1000,
+      at: 10_000,
+    })
+    assert.equal(first.acquired, true)
+    assert.equal(first.mission.schedulerLease.owner, "owner-a")
+
+    const denied = await acquireSchedulerLease(dir, "s", "owner-b", {
+      expectedMissionID: mission.missionID,
+      leaseMs: 1000,
+      at: 10_500,
+    })
+    assert.equal(denied.acquired, false)
+    assert.equal(denied.leaseExpiresAtMs, 11_000)
+
+    assert.equal(await renewSchedulerLease(dir, "s", "owner-b", {
+      expectedMissionID: mission.missionID,
+      leaseMs: 1000,
+      at: 10_600,
+    }), null)
+    const renewed = await renewSchedulerLease(dir, "s", "owner-a", {
+      expectedMissionID: mission.missionID,
+      leaseMs: 1000,
+      at: 10_600,
+    })
+    assert.equal(renewed.schedulerLease.expiresAtMs, 11_600)
+
+    const recovered = await acquireSchedulerLease(dir, "s", "owner-b", {
+      expectedMissionID: mission.missionID,
+      leaseMs: 1000,
+      at: 11_601,
+    })
+    assert.equal(recovered.acquired, true)
+    assert.equal(recovered.mission.schedulerLease.owner, "owner-b")
+    assert.equal(await releaseSchedulerLease(dir, "s", "owner-a", mission.missionID), null)
+    const released = await releaseSchedulerLease(dir, "s", "owner-b", mission.missionID)
+    assert.equal(released.schedulerLease, null)
+  })
+})
+
+test("scheduler lease cannot mutate a replacement or stopped Mission", async () => {
+  await withState(async (dir) => {
+    const old = await createMission(dir, "s", "Old")
+    await setStoppedStatus(dir, "s", "complete", "done", old.missionID)
+    const replacement = await createMission(dir, "s", "Replacement")
+    assert.equal(await acquireSchedulerLease(dir, "s", "old-owner", {
+      expectedMissionID: old.missionID,
+    }), null)
+    await setStoppedStatus(dir, "s", "paused", "user pause", replacement.missionID)
+    assert.equal(await acquireSchedulerLease(dir, "s", "new-owner", {
+      expectedMissionID: replacement.missionID,
+    }), null)
+  })
+})
+
+test("scheduler lease permits one idempotent budget wrap-up", async () => {
+  await withState(async (dir) => {
+    const mission = await createMission(dir, "s", "Budget", 10)
+    await accountMissionUsage(dir, "s", [
+      { sessionID: "s", message: assistant("over", { input: 10, output: 1 }) },
+    ], { expectedMissionID: mission.missionID })
+    const lease = await acquireSchedulerLease(dir, "s", "wrap-owner", {
+      expectedMissionID: mission.missionID,
+    })
+    assert.equal(lease.acquired, true)
+    assert.ok(await markBudgetWrapupSent(dir, "s", mission.missionID))
+    assert.equal(await markBudgetWrapupSent(dir, "s", mission.missionID), null)
+    assert.equal(await acquireSchedulerLease(dir, "s", "other-owner", {
+      expectedMissionID: mission.missionID,
+    }), null)
   })
 })

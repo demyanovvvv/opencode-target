@@ -5,7 +5,7 @@ import { mkdir, open, readFile, rename, rm, stat, unlink, writeFile } from "node
 import os from "node:os"
 import path from "node:path"
 
-const SCHEMA_VERSION = 2
+const SCHEMA_VERSION = 3
 const MAX_OBJECTIVE_CHARS = 4000
 const MISSION_STATUSES = Object.freeze([
   "active",
@@ -19,6 +19,7 @@ const STOPPED_STATUSES = new Set(["paused", "blocked", "usage_limited", "budget_
 const TERMINAL_STATUSES = new Set(["budget_limited", "complete"])
 
 const LOCK_STALE_MS = 15_000
+const LOCK_HEARTBEAT_MS = 5_000
 const LOCK_RETRIES = 120
 const LOCK_RETRY_MS = 25
 const ACCOUNTING_ENTRY_LIMIT = 12_000
@@ -32,6 +33,10 @@ function nowMs() {
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+function newSchedulerOwnerID() {
+  return `plugin:${process.pid}:${randomUUID()}`
 }
 
 function defaultStateDir(env = process.env, platform = process.platform) {
@@ -70,11 +75,18 @@ async function withSessionLock(stateDir, sessionID, fn) {
     let handle
     try {
       handle = await open(file, "wx", 0o600)
+      const owner = `${process.pid}:${randomUUID()}`
+      await handle.writeFile(JSON.stringify({ owner, pid: process.pid, createdAtMs: Date.now() }))
+      const heartbeat = setInterval(() => {
+        void handle.utimes(new Date(), new Date()).catch(() => {})
+      }, LOCK_HEARTBEAT_MS)
       try {
         return await fn()
       } finally {
+        clearInterval(heartbeat)
         await handle.close().catch(() => {})
-        await unlink(file).catch(() => {})
+        const current = await readFile(file, "utf8").catch(() => "")
+        if (current.includes(owner)) await unlink(file).catch(() => {})
       }
     } catch (error) {
       if (error?.code !== "EEXIST") throw error
@@ -151,6 +163,18 @@ function normalizeRuntime(value = {}) {
   }
 }
 
+function normalizeSchedulerLease(value) {
+  if (!value || typeof value !== "object" || !value.owner) return null
+  const acquiredAtMs = Math.max(0, Number(value.acquiredAtMs) || 0)
+  const expiresAtMs = Math.max(0, Number(value.expiresAtMs) || 0)
+  if (!expiresAtMs) return null
+  return {
+    owner: String(value.owner),
+    acquiredAtMs,
+    expiresAtMs,
+  }
+}
+
 function normalizeMission(mission) {
   if (!mission || typeof mission !== "object") throw new Error("Invalid Mission state.")
   const status = MISSION_STATUSES.includes(mission.status) ? mission.status : "active"
@@ -186,6 +210,7 @@ function normalizeMission(mission) {
     lastError: mission.lastError ? String(mission.lastError) : null,
     stopReason: mission.stopReason ? String(mission.stopReason) : null,
     budgetWrapupSent: Boolean(mission.budgetWrapupSent),
+    schedulerLease: normalizeSchedulerLease(mission.schedulerLease),
     usageByMessage: trimmedUsage,
     runtime: normalizeRuntime(mission.runtime),
   }
@@ -193,11 +218,27 @@ function normalizeMission(mission) {
 
 async function readMission(stateDir, sessionID) {
   const file = missionPath(stateDir, sessionID)
+  let raw
   try {
-    return normalizeMission(JSON.parse(await readFile(file, "utf8")))
+    raw = await readFile(file, "utf8")
   } catch (error) {
     if (error?.code === "ENOENT") return null
     throw error
+  }
+  try {
+    return normalizeMission(JSON.parse(raw))
+  } catch (error) {
+    const quarantineDir = path.join(stateDir, "corrupt")
+    await mkdir(quarantineDir, { recursive: true })
+    const quarantine = path.join(
+      quarantineDir,
+      `${path.basename(file)}.${Date.now()}.${randomUUID()}.corrupt`,
+    )
+    await rename(file, quarantine)
+    const diagnostic = new Error(`Mission state is corrupt and was quarantined: ${quarantine}`)
+    diagnostic.code = "MISSION_STATE_CORRUPT"
+    diagnostic.cause = error
+    throw diagnostic
   }
 }
 
@@ -303,6 +344,7 @@ function snapshotMission(mission, at = nowMs()) {
       descendantTokensUsed: m.descendantTokensUsed,
       timeUsedSeconds: m.timeUsedSeconds,
       continuationCount: m.continuationCount,
+      schedulerLease: m.schedulerLease,
       stopReason: m.stopReason,
       runtime: {
         emptyAutomaticStreak: m.runtime.emptyAutomaticStreak,
@@ -401,6 +443,7 @@ async function setStoppedStatus(
 
     freezeClock(mission, at)
     mission.status = status
+    mission.schedulerLease = null
     mission.stopReason = reason
     mission.updatedAtMs = at
     mission.lastStatusChangeAtMs = at
@@ -420,6 +463,7 @@ async function resumeMission(stateDir, sessionID, expectedMissionID = null) {
     if (isBudgetExhausted(mission)) {
       freezeClock(mission, at)
       mission.status = "budget_limited"
+      mission.schedulerLease = null
       mission.stopReason = "Token budget exhausted"
     } else {
       mission.status = "active"
@@ -585,11 +629,20 @@ async function accountMissionUsage(
   })
 }
 
-async function markContinuationStarted(stateDir, sessionID, expectedMissionID = null) {
+async function markContinuationStarted(
+  stateDir,
+  sessionID,
+  expectedMissionID = null,
+  expectedLeaseOwner = null,
+) {
   return withSessionLock(stateDir, sessionID, async () => {
     const mission = await readMission(stateDir, sessionID)
     if (!mission || mission.status !== "active" || !ensureExpectedMission(mission, expectedMissionID)) return null
     const at = nowMs()
+    if (expectedLeaseOwner != null && (
+      mission.schedulerLease?.owner !== expectedLeaseOwner ||
+      mission.schedulerLease.expiresAtMs <= at
+    )) return null
     mission.continuationCount += 1
     mission.lastContinuationAtMs = at
     startClock(mission, at)
@@ -598,10 +651,80 @@ async function markContinuationStarted(stateDir, sessionID, expectedMissionID = 
   })
 }
 
+async function acquireSchedulerLease(
+  stateDir,
+  sessionID,
+  owner,
+  { expectedMissionID = null, leaseMs = 30_000, at = nowMs() } = {},
+) {
+  const normalizedOwner = String(owner || "").trim()
+  if (!normalizedOwner) throw new Error("Scheduler lease owner cannot be empty.")
+  const duration = Number(leaseMs)
+  if (!Number.isSafeInteger(duration) || duration <= 0) {
+    throw new Error("Scheduler lease duration must be a positive integer.")
+  }
+  return withSessionLock(stateDir, sessionID, async () => {
+    const mission = await readMission(stateDir, sessionID)
+    const leaseEligible = mission?.status === "active" || (
+      mission?.status === "budget_limited" && !mission.budgetWrapupSent
+    )
+    if (!leaseEligible || !ensureExpectedMission(mission, expectedMissionID)) return null
+    const lease = mission.schedulerLease
+    if (lease && lease.owner !== normalizedOwner && lease.expiresAtMs > at) {
+      return { acquired: false, mission, leaseExpiresAtMs: lease.expiresAtMs }
+    }
+    mission.schedulerLease = {
+      owner: normalizedOwner,
+      acquiredAtMs: lease?.owner === normalizedOwner ? lease.acquiredAtMs : at,
+      expiresAtMs: at + duration,
+    }
+    mission.updatedAtMs = Math.max(mission.updatedAtMs, at)
+    return { acquired: true, mission: await writeMissionUnlocked(stateDir, mission) }
+  })
+}
+
+async function renewSchedulerLease(
+  stateDir,
+  sessionID,
+  owner,
+  { expectedMissionID = null, leaseMs = 30_000, at = nowMs() } = {},
+) {
+  const duration = Number(leaseMs)
+  if (!Number.isSafeInteger(duration) || duration <= 0) {
+    throw new Error("Scheduler lease duration must be a positive integer.")
+  }
+  return withSessionLock(stateDir, sessionID, async () => {
+    const mission = await readMission(stateDir, sessionID)
+    if (
+      !mission ||
+      (mission.status !== "active" && mission.status !== "budget_limited") ||
+      !ensureExpectedMission(mission, expectedMissionID) ||
+      mission.schedulerLease?.owner !== String(owner)
+    ) return null
+    mission.schedulerLease.expiresAtMs = at + duration
+    mission.updatedAtMs = Math.max(mission.updatedAtMs, at)
+    return writeMissionUnlocked(stateDir, mission)
+  })
+}
+
+async function releaseSchedulerLease(stateDir, sessionID, owner, expectedMissionID = null) {
+  return withSessionLock(stateDir, sessionID, async () => {
+    const mission = await readMission(stateDir, sessionID)
+    if (
+      !mission ||
+      !ensureExpectedMission(mission, expectedMissionID) ||
+      mission.schedulerLease?.owner !== String(owner)
+    ) return null
+    mission.schedulerLease = null
+    mission.updatedAtMs = nowMs()
+    return writeMissionUnlocked(stateDir, mission)
+  })
+}
+
 async function markBudgetWrapupSent(stateDir, sessionID, expectedMissionID = null) {
   return withSessionLock(stateDir, sessionID, async () => {
     const mission = await readMission(stateDir, sessionID)
-    if (!mission || !ensureExpectedMission(mission, expectedMissionID)) return null
+    if (!mission || mission.budgetWrapupSent || !ensureExpectedMission(mission, expectedMissionID)) return null
     mission.budgetWrapupSent = true
     mission.updatedAtMs = nowMs()
     return writeMissionUnlocked(stateDir, mission)
@@ -702,11 +825,13 @@ async function recordMissionTurnOutcome(
       if (mission.runtime.failedExecStreak >= failedExecThreshold) {
         freezeClock(mission, at)
         mission.status = "blocked"
+        mission.schedulerLease = null
         mission.stopReason = `Runtime circuit breaker: execution failed in ${mission.runtime.failedExecStreak} consecutive Mission turns without a successful tool call`
         mission.lastStatusChangeAtMs = at
       } else if (mission.runtime.emptyAutomaticStreak >= emptyAutomaticThreshold) {
         freezeClock(mission, at)
         mission.status = "blocked"
+        mission.schedulerLease = null
         mission.stopReason = `Runtime circuit breaker: ${mission.runtime.emptyAutomaticStreak} consecutive empty automatic Mission turns`
         mission.lastStatusChangeAtMs = at
       }
@@ -867,6 +992,7 @@ function parseMissionCommand(raw) {
 
   if (command === "status" || command === "view") return { op: "view" }
   if (command === "help") return { op: "help" }
+  if (command === "doctor") return { op: "doctor" }
   if (command === "pause") return { op: "pause", reason: tail || null }
   if (command === "resume") return { op: "resume" }
   if (command === "clear") return { op: "clear" }
@@ -910,6 +1036,7 @@ function missionHelp(commandName = "mission", alias = "msn") {
     `/${commandName} pause [reason]              Pause the Mission`,
     `/${commandName} resume                      Resume a paused/blocked Mission`,
     `/${commandName} budget <N|off>              Change budget (does not auto-resume)`,
+    `/${commandName} doctor                      Diagnose state and OpenCode APIs`,
     `/${commandName} clear                       Remove persisted Mission state`,
     alias ? `/${alias} ...                              Short alias` : null,
   ].filter(Boolean).join("\n")
@@ -967,8 +1094,11 @@ async function listMessages(client, sessionID) {
     const response = await client.session.messages({ path: { id: sessionID } })
     const data = unwrapData(response)
     return Array.isArray(data) ? data : []
-  } catch {
-    return []
+  } catch (error) {
+    const failure = new Error(`OpenCode messages API failed for session ${sessionID}: ${error?.message || String(error)}`)
+    failure.code = "OPENCODE_MESSAGES_FAILED"
+    failure.cause = error
+    throw failure
   }
 }
 
@@ -977,8 +1107,11 @@ async function listChildren(client, sessionID) {
     const response = await client.session.children({ path: { id: sessionID } })
     const data = unwrapData(response)
     return Array.isArray(data) ? data : []
-  } catch {
-    return []
+  } catch (error) {
+    const failure = new Error(`OpenCode children API failed for session ${sessionID}: ${error?.message || String(error)}`)
+    failure.code = "OPENCODE_CHILDREN_FAILED"
+    failure.cause = error
+    throw failure
   }
 }
 
@@ -1055,11 +1188,74 @@ function commandResultPrompt(action, mission, continueNow = false, extraContext 
 }
 
 function getConfiguredMaxBudget(options) {
-  const raw = options?.max_mission_token_budget
-  if (raw === undefined || raw === null || raw === "") return null
-  const n = Number(raw)
-  if (!Number.isSafeInteger(n) || n <= 0) throw new Error("max_mission_token_budget must be a positive integer")
-  return n
+  return options?.max_mission_token_budget ?? null
+}
+
+function integerOption(options, name, fallback, minimum) {
+  const raw = options?.[name]
+  if (raw === undefined || raw === null || raw === "") return fallback
+  const value = Number(raw)
+  if (!Number.isSafeInteger(value) || value < minimum) {
+    throw new Error(`${name} must be an integer greater than or equal to ${minimum}`)
+  }
+  return value
+}
+
+export function normalizePluginOptions(options = {}) {
+  if (!options || typeof options !== "object" || Array.isArray(options)) {
+    throw new Error("Mission plugin options must be an object")
+  }
+  const commandName = String(options.command_name ?? DEFAULT_COMMAND).trim()
+  if (!commandName || /\s/.test(commandName)) throw new Error("command_name must be a non-empty command without whitespace")
+  const alias = options.alias === false ? false : String(options.alias ?? DEFAULT_ALIAS).trim()
+  if (alias !== false && (!alias || /\s/.test(alias))) throw new Error("alias must be false or a non-empty command without whitespace")
+  if (options.auto_continue !== undefined && typeof options.auto_continue !== "boolean") {
+    throw new Error("auto_continue must be a boolean")
+  }
+  if (options.exec_tool_names !== undefined && (
+    !Array.isArray(options.exec_tool_names) ||
+    options.exec_tool_names.some((name) => typeof name !== "string" || !name.trim())
+  )) {
+    throw new Error("exec_tool_names must be an array of non-empty strings")
+  }
+  const maxBudget = integerOption(options, "max_mission_token_budget", null, 1)
+  return Object.freeze({
+    ...options,
+    state_dir: options.state_dir == null ? null : String(options.state_dir),
+    command_name: commandName,
+    alias,
+    auto_continue: options.auto_continue ?? true,
+    max_mission_token_budget: maxBudget,
+    min_continue_interval_ms: integerOption(options, "min_continue_interval_ms", 250, 0),
+    failed_exec_threshold: integerOption(options, "failed_exec_threshold", 3, 1),
+    empty_auto_threshold: integerOption(options, "empty_auto_threshold", 3, 1),
+    descendant_max_depth: integerOption(options, "descendant_max_depth", 6, 0),
+    descendant_max_sessions: integerOption(options, "descendant_max_sessions", 96, 1),
+    scheduler_lease_ms: integerOption(options, "scheduler_lease_ms", 30_000, 1_000),
+    exec_tool_names: options.exec_tool_names?.map((name) => name.trim()),
+  })
+}
+
+async function missionDiagnostics(client, stateDir, sessionID) {
+  const checks = []
+  try {
+    const mission = await readMission(stateDir, sessionID)
+    checks.push(`state: ok (${mission ? mission.status : "no Mission"})`)
+  } catch (error) {
+    checks.push(`state: error (${error?.message || String(error)})`)
+  }
+  for (const [label, operation] of [
+    ["messages API", () => listMessages(client, sessionID)],
+    ["children API", () => listChildren(client, sessionID)],
+  ]) {
+    try {
+      await operation()
+      checks.push(`${label}: ok`)
+    } catch (error) {
+      checks.push(`${label}: error (${error?.message || String(error)})`)
+    }
+  }
+  return `Mission diagnostics\n${checks.map((check) => `- ${check}`).join("\n")}`
 }
 
 async function handleSlashCommand(client, stateDir, sessionID, rawArguments, options) {
@@ -1078,6 +1274,10 @@ async function handleSlashCommand(client, stateDir, sessionID, rawArguments, opt
     const mission = await readMission(stateDir, sessionID)
     if (mission?.status === "active") await deferNextContinuation(stateDir, sessionID, 1, mission.missionID)
     return commandResultPrompt(missionHelp(DEFAULT_COMMAND, DEFAULT_ALIAS), mission, false)
+  }
+
+  if (parsed.op === "doctor") {
+    return commandResultPrompt(await missionDiagnostics(client, stateDir, sessionID), null, false)
   }
 
   if (parsed.op === "set") {
@@ -1207,12 +1407,34 @@ async function processIdle(client, stateDir, sessionID, options) {
   continuationInFlight.add(sessionID)
 
   let shouldRecheck = false
+  let leaseOwner = null
+  let leaseMissionID = null
+  let leaseHeartbeat = null
   let recheckDelay = Math.max(50, Number(options?.min_continue_interval_ms ?? 250))
 
   try {
     let mission = await readMission(stateDir, sessionID)
     if (!mission) return
     const expectedMissionID = mission.missionID
+    leaseOwner = newSchedulerOwnerID()
+    const lease = await acquireSchedulerLease(stateDir, sessionID, leaseOwner, {
+      expectedMissionID,
+      leaseMs: options.scheduler_lease_ms,
+    })
+    if (!lease?.acquired) {
+      if (lease?.leaseExpiresAtMs) {
+        shouldRecheck = true
+        recheckDelay = Math.max(50, lease.leaseExpiresAtMs - Date.now() + 10)
+      }
+      return
+    }
+    leaseMissionID = expectedMissionID
+    leaseHeartbeat = setInterval(() => {
+      void renewSchedulerLease(stateDir, sessionID, leaseOwner, {
+        expectedMissionID,
+        leaseMs: options.scheduler_lease_ms,
+      }).catch(() => {})
+    }, Math.max(250, Math.floor(options.scheduler_lease_ms / 3)))
 
     const rootMessages = await listMessages(client, sessionID)
     mission = (await recordRootTurnOutcomes(stateDir, sessionID, mission, rootMessages, options)) || mission
@@ -1260,7 +1482,7 @@ async function processIdle(client, stateDir, sessionID, options) {
       }
     }
 
-    mission = await markContinuationStarted(stateDir, sessionID, expectedMissionID)
+    mission = await markContinuationStarted(stateDir, sessionID, expectedMissionID, leaseOwner)
     if (!mission) return
 
     // session.prompt is awaited, so this is one physical OpenCode turn, mirroring
@@ -1285,6 +1507,10 @@ async function processIdle(client, stateDir, sessionID, options) {
       error: String(error?.stack || error),
     })
   } finally {
+    if (leaseHeartbeat) clearInterval(leaseHeartbeat)
+    if (leaseOwner && leaseMissionID) {
+      await releaseSchedulerLease(stateDir, sessionID, leaseOwner, leaseMissionID).catch(() => {})
+    }
     continuationInFlight.delete(sessionID)
     if (shouldRecheck) scheduleRecheck(client, stateDir, sessionID, options, recheckDelay)
   }
@@ -1301,7 +1527,8 @@ function completionResponse(mission) {
   }, null, 2)
 }
 
-export const MissionPlugin = async ({ client }, options = {}) => {
+export const MissionPlugin = async ({ client }, rawOptions = {}) => {
+  const options = normalizePluginOptions(rawOptions)
   const stateDir = options.state_dir ? String(options.state_dir) : defaultStateDir()
   const commandName = String(options.command_name || DEFAULT_COMMAND)
   const aliasName = options.alias === false ? null : String(options.alias || DEFAULT_ALIAS)

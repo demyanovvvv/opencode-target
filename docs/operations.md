@@ -29,10 +29,18 @@ Use the command inside the affected session:
 ```text
 /mission status
 /mission budget
+/mission doctor
 ```
 
 The `get_mission` model tool returns the same persisted state with root and descendant usage.
 Runtime logs are written through `client.app.log` and use the `opencode-mission` plugin identity.
+
+`/mission doctor` separately reports persisted state, the messages API, and the child-session API.
+An API error is not interpreted as an empty response, because doing so could hide usage or
+descendant-session data.
+
+If state JSON is malformed, Mission moves it to `<state_dir>/corrupt/` with a timestamp suffix and
+raises a `MISSION_STATE_CORRUPT` diagnostic. Preserve that file before manual recovery.
 
 ## Mission is not continuing
 
@@ -45,6 +53,11 @@ Check these in order:
 5. Check whether a control command intentionally deferred one continuation.
 6. Inspect OpenCode logs for a runtime error or a continuation scheduling failure.
 7. If the Mission is paused or blocked, resolve the reason and run `/mission resume`.
+
+If an OpenCode process exits while owning continuation, its persisted scheduler lease becomes
+recoverable after `scheduler_lease_ms` (30 seconds by default). A later `session.idle` event can
+then acquire the expired lease. Do not place the state directory on a shared network filesystem;
+the lock and lease guarantees target processes on one host with a shared local state directory.
 
 Do not mark a Mission active by hand in JSON while a previous turn may still be finishing.
 

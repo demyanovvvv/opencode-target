@@ -10,14 +10,18 @@ Windows:     %LOCALAPPDATA%\opencode-mission\missions\<encoded-session>.json
 
 The state directory can be overridden with `OPENCODE_MISSION_STATE_DIR`.
 
+Malformed or schema-invalid state is never treated as an absent Mission. The runtime atomically
+moves it to `<state_dir>/corrupt/<original>.<timestamp>.<id>.corrupt` and reports
+`MISSION_STATE_CORRUPT` so an operator can inspect or restore it explicitly.
+
 ## Schema
 
-The current persisted schema version is `2`. The implementation normalizes loaded state to the
+The current persisted schema version is `3`. The implementation normalizes loaded state to the
 current shape before using it.
 
 | Field | Type | Meaning |
 |---|---|---|
-| `version` | number | Current schema version, currently `2`. |
+| `version` | number | Current schema version, currently `3`. |
 | `sessionID` | string | Root OpenCode session owning the Mission. |
 | `missionID` | string | Unique logical Mission generation. Used by stale-write guards. |
 | `objective` | string | User-provided objective, normalized and limited to 4000 characters. |
@@ -33,6 +37,7 @@ current shape before using it.
 | `activeStartedAtMs` | number or null | Start of the current active interval. |
 | `accumulatedActiveMs` | number | Completed active intervals in milliseconds. |
 | `continuationCount` | integer | Number of automatic continuation turns started. |
+| `schedulerLease` | object or null | Current continuation owner, acquisition time, and expiry. Only the matching owner may renew, release, or start the leased turn. |
 | `continuationDeferrals` | integer | Pending one-shot deferrals from control commands. |
 | `lastContinuationAtMs` | number or null | Timestamp of the latest continuation start. |
 | `lastError` | string or null | Latest runtime error, when present. |

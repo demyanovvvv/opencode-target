@@ -49,6 +49,13 @@ Every asynchronous mutation carries an expected `mission_id`. New Missions after
 
 `session.idle` is the durable continuation boundary. `session.prompt()` is awaited for automatic continuations, giving Mission a physical-turn loop rather than an instruction for a single response to self-continue.
 
+The in-process scheduler deduplicates active work per plugin instance. A persisted owner lease also
+coordinates multiple OpenCode plugin processes that share the same local state directory. The
+lease has a heartbeat while a turn is in flight, expires after a crash, and is fenced by both
+`mission_id` and owner before a continuation is counted or prompted. It is not a distributed lock
+for multi-host or network-filesystem operation. Host API failures are explicit errors and are never
+represented as empty message or child-session lists, because that would make accounting fail open.
+
 ## Accounting
 
 Per assistant message:

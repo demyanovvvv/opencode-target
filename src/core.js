@@ -3,7 +3,7 @@ import { mkdir, open, readFile, rename, rm, stat, unlink, writeFile } from "node
 import os from "node:os"
 import path from "node:path"
 
-export const SCHEMA_VERSION = 2
+export const SCHEMA_VERSION = 3
 export const MAX_OBJECTIVE_CHARS = 4000
 export const MISSION_STATUSES = Object.freeze([
   "active",
@@ -17,6 +17,7 @@ export const STOPPED_STATUSES = new Set(["paused", "blocked", "usage_limited", "
 export const TERMINAL_STATUSES = new Set(["budget_limited", "complete"])
 
 const LOCK_STALE_MS = 15_000
+const LOCK_HEARTBEAT_MS = 5_000
 const LOCK_RETRIES = 120
 const LOCK_RETRY_MS = 25
 const ACCOUNTING_ENTRY_LIMIT = 12_000
@@ -30,6 +31,10 @@ export function nowMs() {
 
 export function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+export function newSchedulerOwnerID() {
+  return `plugin:${process.pid}:${randomUUID()}`
 }
 
 export function defaultStateDir(env = process.env, platform = process.platform) {
@@ -68,11 +73,18 @@ export async function withSessionLock(stateDir, sessionID, fn) {
     let handle
     try {
       handle = await open(file, "wx", 0o600)
+      const owner = `${process.pid}:${randomUUID()}`
+      await handle.writeFile(JSON.stringify({ owner, pid: process.pid, createdAtMs: Date.now() }))
+      const heartbeat = setInterval(() => {
+        void handle.utimes(new Date(), new Date()).catch(() => {})
+      }, LOCK_HEARTBEAT_MS)
       try {
         return await fn()
       } finally {
+        clearInterval(heartbeat)
         await handle.close().catch(() => {})
-        await unlink(file).catch(() => {})
+        const current = await readFile(file, "utf8").catch(() => "")
+        if (current.includes(owner)) await unlink(file).catch(() => {})
       }
     } catch (error) {
       if (error?.code !== "EEXIST") throw error
@@ -149,6 +161,18 @@ function normalizeRuntime(value = {}) {
   }
 }
 
+function normalizeSchedulerLease(value) {
+  if (!value || typeof value !== "object" || !value.owner) return null
+  const acquiredAtMs = Math.max(0, Number(value.acquiredAtMs) || 0)
+  const expiresAtMs = Math.max(0, Number(value.expiresAtMs) || 0)
+  if (!expiresAtMs) return null
+  return {
+    owner: String(value.owner),
+    acquiredAtMs,
+    expiresAtMs,
+  }
+}
+
 export function normalizeMission(mission) {
   if (!mission || typeof mission !== "object") throw new Error("Invalid Mission state.")
   const status = MISSION_STATUSES.includes(mission.status) ? mission.status : "active"
@@ -184,6 +208,7 @@ export function normalizeMission(mission) {
     lastError: mission.lastError ? String(mission.lastError) : null,
     stopReason: mission.stopReason ? String(mission.stopReason) : null,
     budgetWrapupSent: Boolean(mission.budgetWrapupSent),
+    schedulerLease: normalizeSchedulerLease(mission.schedulerLease),
     usageByMessage: trimmedUsage,
     runtime: normalizeRuntime(mission.runtime),
   }
@@ -191,11 +216,27 @@ export function normalizeMission(mission) {
 
 export async function readMission(stateDir, sessionID) {
   const file = missionPath(stateDir, sessionID)
+  let raw
   try {
-    return normalizeMission(JSON.parse(await readFile(file, "utf8")))
+    raw = await readFile(file, "utf8")
   } catch (error) {
     if (error?.code === "ENOENT") return null
     throw error
+  }
+  try {
+    return normalizeMission(JSON.parse(raw))
+  } catch (error) {
+    const quarantineDir = path.join(stateDir, "corrupt")
+    await mkdir(quarantineDir, { recursive: true })
+    const quarantine = path.join(
+      quarantineDir,
+      `${path.basename(file)}.${Date.now()}.${randomUUID()}.corrupt`,
+    )
+    await rename(file, quarantine)
+    const diagnostic = new Error(`Mission state is corrupt and was quarantined: ${quarantine}`)
+    diagnostic.code = "MISSION_STATE_CORRUPT"
+    diagnostic.cause = error
+    throw diagnostic
   }
 }
 
@@ -301,6 +342,7 @@ export function snapshotMission(mission, at = nowMs()) {
       descendantTokensUsed: m.descendantTokensUsed,
       timeUsedSeconds: m.timeUsedSeconds,
       continuationCount: m.continuationCount,
+      schedulerLease: m.schedulerLease,
       stopReason: m.stopReason,
       runtime: {
         emptyAutomaticStreak: m.runtime.emptyAutomaticStreak,
@@ -399,6 +441,7 @@ export async function setStoppedStatus(
 
     freezeClock(mission, at)
     mission.status = status
+    mission.schedulerLease = null
     mission.stopReason = reason
     mission.updatedAtMs = at
     mission.lastStatusChangeAtMs = at
@@ -418,6 +461,7 @@ export async function resumeMission(stateDir, sessionID, expectedMissionID = nul
     if (isBudgetExhausted(mission)) {
       freezeClock(mission, at)
       mission.status = "budget_limited"
+      mission.schedulerLease = null
       mission.stopReason = "Token budget exhausted"
     } else {
       mission.status = "active"
@@ -583,11 +627,20 @@ export async function accountMissionUsage(
   })
 }
 
-export async function markContinuationStarted(stateDir, sessionID, expectedMissionID = null) {
+export async function markContinuationStarted(
+  stateDir,
+  sessionID,
+  expectedMissionID = null,
+  expectedLeaseOwner = null,
+) {
   return withSessionLock(stateDir, sessionID, async () => {
     const mission = await readMission(stateDir, sessionID)
     if (!mission || mission.status !== "active" || !ensureExpectedMission(mission, expectedMissionID)) return null
     const at = nowMs()
+    if (expectedLeaseOwner != null && (
+      mission.schedulerLease?.owner !== expectedLeaseOwner ||
+      mission.schedulerLease.expiresAtMs <= at
+    )) return null
     mission.continuationCount += 1
     mission.lastContinuationAtMs = at
     startClock(mission, at)
@@ -596,10 +649,80 @@ export async function markContinuationStarted(stateDir, sessionID, expectedMissi
   })
 }
 
+export async function acquireSchedulerLease(
+  stateDir,
+  sessionID,
+  owner,
+  { expectedMissionID = null, leaseMs = 30_000, at = nowMs() } = {},
+) {
+  const normalizedOwner = String(owner || "").trim()
+  if (!normalizedOwner) throw new Error("Scheduler lease owner cannot be empty.")
+  const duration = Number(leaseMs)
+  if (!Number.isSafeInteger(duration) || duration <= 0) {
+    throw new Error("Scheduler lease duration must be a positive integer.")
+  }
+  return withSessionLock(stateDir, sessionID, async () => {
+    const mission = await readMission(stateDir, sessionID)
+    const leaseEligible = mission?.status === "active" || (
+      mission?.status === "budget_limited" && !mission.budgetWrapupSent
+    )
+    if (!leaseEligible || !ensureExpectedMission(mission, expectedMissionID)) return null
+    const lease = mission.schedulerLease
+    if (lease && lease.owner !== normalizedOwner && lease.expiresAtMs > at) {
+      return { acquired: false, mission, leaseExpiresAtMs: lease.expiresAtMs }
+    }
+    mission.schedulerLease = {
+      owner: normalizedOwner,
+      acquiredAtMs: lease?.owner === normalizedOwner ? lease.acquiredAtMs : at,
+      expiresAtMs: at + duration,
+    }
+    mission.updatedAtMs = Math.max(mission.updatedAtMs, at)
+    return { acquired: true, mission: await writeMissionUnlocked(stateDir, mission) }
+  })
+}
+
+export async function renewSchedulerLease(
+  stateDir,
+  sessionID,
+  owner,
+  { expectedMissionID = null, leaseMs = 30_000, at = nowMs() } = {},
+) {
+  const duration = Number(leaseMs)
+  if (!Number.isSafeInteger(duration) || duration <= 0) {
+    throw new Error("Scheduler lease duration must be a positive integer.")
+  }
+  return withSessionLock(stateDir, sessionID, async () => {
+    const mission = await readMission(stateDir, sessionID)
+    if (
+      !mission ||
+      (mission.status !== "active" && mission.status !== "budget_limited") ||
+      !ensureExpectedMission(mission, expectedMissionID) ||
+      mission.schedulerLease?.owner !== String(owner)
+    ) return null
+    mission.schedulerLease.expiresAtMs = at + duration
+    mission.updatedAtMs = Math.max(mission.updatedAtMs, at)
+    return writeMissionUnlocked(stateDir, mission)
+  })
+}
+
+export async function releaseSchedulerLease(stateDir, sessionID, owner, expectedMissionID = null) {
+  return withSessionLock(stateDir, sessionID, async () => {
+    const mission = await readMission(stateDir, sessionID)
+    if (
+      !mission ||
+      !ensureExpectedMission(mission, expectedMissionID) ||
+      mission.schedulerLease?.owner !== String(owner)
+    ) return null
+    mission.schedulerLease = null
+    mission.updatedAtMs = nowMs()
+    return writeMissionUnlocked(stateDir, mission)
+  })
+}
+
 export async function markBudgetWrapupSent(stateDir, sessionID, expectedMissionID = null) {
   return withSessionLock(stateDir, sessionID, async () => {
     const mission = await readMission(stateDir, sessionID)
-    if (!mission || !ensureExpectedMission(mission, expectedMissionID)) return null
+    if (!mission || mission.budgetWrapupSent || !ensureExpectedMission(mission, expectedMissionID)) return null
     mission.budgetWrapupSent = true
     mission.updatedAtMs = nowMs()
     return writeMissionUnlocked(stateDir, mission)
@@ -700,11 +823,13 @@ export async function recordMissionTurnOutcome(
       if (mission.runtime.failedExecStreak >= failedExecThreshold) {
         freezeClock(mission, at)
         mission.status = "blocked"
+        mission.schedulerLease = null
         mission.stopReason = `Runtime circuit breaker: execution failed in ${mission.runtime.failedExecStreak} consecutive Mission turns without a successful tool call`
         mission.lastStatusChangeAtMs = at
       } else if (mission.runtime.emptyAutomaticStreak >= emptyAutomaticThreshold) {
         freezeClock(mission, at)
         mission.status = "blocked"
+        mission.schedulerLease = null
         mission.stopReason = `Runtime circuit breaker: ${mission.runtime.emptyAutomaticStreak} consecutive empty automatic Mission turns`
         mission.lastStatusChangeAtMs = at
       }
@@ -865,6 +990,7 @@ export function parseMissionCommand(raw) {
 
   if (command === "status" || command === "view") return { op: "view" }
   if (command === "help") return { op: "help" }
+  if (command === "doctor") return { op: "doctor" }
   if (command === "pause") return { op: "pause", reason: tail || null }
   if (command === "resume") return { op: "resume" }
   if (command === "clear") return { op: "clear" }
@@ -908,6 +1034,7 @@ export function missionHelp(commandName = "mission", alias = "msn") {
     `/${commandName} pause [reason]              Pause the Mission`,
     `/${commandName} resume                      Resume a paused/blocked Mission`,
     `/${commandName} budget <N|off>              Change budget (does not auto-resume)`,
+    `/${commandName} doctor                      Diagnose state and OpenCode APIs`,
     `/${commandName} clear                       Remove persisted Mission state`,
     alias ? `/${alias} ...                              Short alias` : null,
   ].filter(Boolean).join("\n")

@@ -1,6 +1,7 @@
 import { tool } from "@opencode-ai/plugin"
 import {
   accountMissionUsage,
+  acquireSchedulerLease,
   budgetLimitPrompt,
   compactionMissionContext,
   conciseStatus,
@@ -13,12 +14,15 @@ import {
   markBudgetWrapupSent,
   markContinuationStarted,
   missionHelp,
+  newSchedulerOwnerID,
   objectiveUpdatedPrompt,
   parseMissionCommand,
   pauseMission,
   publicMissionJSON,
   readMission,
   recordMissionTurnOutcome,
+  releaseSchedulerLease,
+  renewSchedulerLease,
   resumeMission,
   resumePrompt,
   seedMissionUsageBaselines,
@@ -76,8 +80,11 @@ async function listMessages(client, sessionID) {
     const response = await client.session.messages({ path: { id: sessionID } })
     const data = unwrapData(response)
     return Array.isArray(data) ? data : []
-  } catch {
-    return []
+  } catch (error) {
+    const failure = new Error(`OpenCode messages API failed for session ${sessionID}: ${error?.message || String(error)}`)
+    failure.code = "OPENCODE_MESSAGES_FAILED"
+    failure.cause = error
+    throw failure
   }
 }
 
@@ -86,8 +93,11 @@ async function listChildren(client, sessionID) {
     const response = await client.session.children({ path: { id: sessionID } })
     const data = unwrapData(response)
     return Array.isArray(data) ? data : []
-  } catch {
-    return []
+  } catch (error) {
+    const failure = new Error(`OpenCode children API failed for session ${sessionID}: ${error?.message || String(error)}`)
+    failure.code = "OPENCODE_CHILDREN_FAILED"
+    failure.cause = error
+    throw failure
   }
 }
 
@@ -164,11 +174,74 @@ function commandResultPrompt(action, mission, continueNow = false, extraContext 
 }
 
 function getConfiguredMaxBudget(options) {
-  const raw = options?.max_mission_token_budget
-  if (raw === undefined || raw === null || raw === "") return null
-  const n = Number(raw)
-  if (!Number.isSafeInteger(n) || n <= 0) throw new Error("max_mission_token_budget must be a positive integer")
-  return n
+  return options?.max_mission_token_budget ?? null
+}
+
+function integerOption(options, name, fallback, minimum) {
+  const raw = options?.[name]
+  if (raw === undefined || raw === null || raw === "") return fallback
+  const value = Number(raw)
+  if (!Number.isSafeInteger(value) || value < minimum) {
+    throw new Error(`${name} must be an integer greater than or equal to ${minimum}`)
+  }
+  return value
+}
+
+export function normalizePluginOptions(options = {}) {
+  if (!options || typeof options !== "object" || Array.isArray(options)) {
+    throw new Error("Mission plugin options must be an object")
+  }
+  const commandName = String(options.command_name ?? DEFAULT_COMMAND).trim()
+  if (!commandName || /\s/.test(commandName)) throw new Error("command_name must be a non-empty command without whitespace")
+  const alias = options.alias === false ? false : String(options.alias ?? DEFAULT_ALIAS).trim()
+  if (alias !== false && (!alias || /\s/.test(alias))) throw new Error("alias must be false or a non-empty command without whitespace")
+  if (options.auto_continue !== undefined && typeof options.auto_continue !== "boolean") {
+    throw new Error("auto_continue must be a boolean")
+  }
+  if (options.exec_tool_names !== undefined && (
+    !Array.isArray(options.exec_tool_names) ||
+    options.exec_tool_names.some((name) => typeof name !== "string" || !name.trim())
+  )) {
+    throw new Error("exec_tool_names must be an array of non-empty strings")
+  }
+  const maxBudget = integerOption(options, "max_mission_token_budget", null, 1)
+  return Object.freeze({
+    ...options,
+    state_dir: options.state_dir == null ? null : String(options.state_dir),
+    command_name: commandName,
+    alias,
+    auto_continue: options.auto_continue ?? true,
+    max_mission_token_budget: maxBudget,
+    min_continue_interval_ms: integerOption(options, "min_continue_interval_ms", 250, 0),
+    failed_exec_threshold: integerOption(options, "failed_exec_threshold", 3, 1),
+    empty_auto_threshold: integerOption(options, "empty_auto_threshold", 3, 1),
+    descendant_max_depth: integerOption(options, "descendant_max_depth", 6, 0),
+    descendant_max_sessions: integerOption(options, "descendant_max_sessions", 96, 1),
+    scheduler_lease_ms: integerOption(options, "scheduler_lease_ms", 30_000, 1_000),
+    exec_tool_names: options.exec_tool_names?.map((name) => name.trim()),
+  })
+}
+
+async function missionDiagnostics(client, stateDir, sessionID) {
+  const checks = []
+  try {
+    const mission = await readMission(stateDir, sessionID)
+    checks.push(`state: ok (${mission ? mission.status : "no Mission"})`)
+  } catch (error) {
+    checks.push(`state: error (${error?.message || String(error)})`)
+  }
+  for (const [label, operation] of [
+    ["messages API", () => listMessages(client, sessionID)],
+    ["children API", () => listChildren(client, sessionID)],
+  ]) {
+    try {
+      await operation()
+      checks.push(`${label}: ok`)
+    } catch (error) {
+      checks.push(`${label}: error (${error?.message || String(error)})`)
+    }
+  }
+  return `Mission diagnostics\n${checks.map((check) => `- ${check}`).join("\n")}`
 }
 
 async function handleSlashCommand(client, stateDir, sessionID, rawArguments, options) {
@@ -187,6 +260,10 @@ async function handleSlashCommand(client, stateDir, sessionID, rawArguments, opt
     const mission = await readMission(stateDir, sessionID)
     if (mission?.status === "active") await deferNextContinuation(stateDir, sessionID, 1, mission.missionID)
     return commandResultPrompt(missionHelp(DEFAULT_COMMAND, DEFAULT_ALIAS), mission, false)
+  }
+
+  if (parsed.op === "doctor") {
+    return commandResultPrompt(await missionDiagnostics(client, stateDir, sessionID), null, false)
   }
 
   if (parsed.op === "set") {
@@ -316,12 +393,34 @@ async function processIdle(client, stateDir, sessionID, options) {
   continuationInFlight.add(sessionID)
 
   let shouldRecheck = false
+  let leaseOwner = null
+  let leaseMissionID = null
+  let leaseHeartbeat = null
   let recheckDelay = Math.max(50, Number(options?.min_continue_interval_ms ?? 250))
 
   try {
     let mission = await readMission(stateDir, sessionID)
     if (!mission) return
     const expectedMissionID = mission.missionID
+    leaseOwner = newSchedulerOwnerID()
+    const lease = await acquireSchedulerLease(stateDir, sessionID, leaseOwner, {
+      expectedMissionID,
+      leaseMs: options.scheduler_lease_ms,
+    })
+    if (!lease?.acquired) {
+      if (lease?.leaseExpiresAtMs) {
+        shouldRecheck = true
+        recheckDelay = Math.max(50, lease.leaseExpiresAtMs - Date.now() + 10)
+      }
+      return
+    }
+    leaseMissionID = expectedMissionID
+    leaseHeartbeat = setInterval(() => {
+      void renewSchedulerLease(stateDir, sessionID, leaseOwner, {
+        expectedMissionID,
+        leaseMs: options.scheduler_lease_ms,
+      }).catch(() => {})
+    }, Math.max(250, Math.floor(options.scheduler_lease_ms / 3)))
 
     const rootMessages = await listMessages(client, sessionID)
     mission = (await recordRootTurnOutcomes(stateDir, sessionID, mission, rootMessages, options)) || mission
@@ -369,7 +468,7 @@ async function processIdle(client, stateDir, sessionID, options) {
       }
     }
 
-    mission = await markContinuationStarted(stateDir, sessionID, expectedMissionID)
+    mission = await markContinuationStarted(stateDir, sessionID, expectedMissionID, leaseOwner)
     if (!mission) return
 
     // session.prompt is awaited, so this is one physical OpenCode turn, mirroring
@@ -394,6 +493,10 @@ async function processIdle(client, stateDir, sessionID, options) {
       error: String(error?.stack || error),
     })
   } finally {
+    if (leaseHeartbeat) clearInterval(leaseHeartbeat)
+    if (leaseOwner && leaseMissionID) {
+      await releaseSchedulerLease(stateDir, sessionID, leaseOwner, leaseMissionID).catch(() => {})
+    }
     continuationInFlight.delete(sessionID)
     if (shouldRecheck) scheduleRecheck(client, stateDir, sessionID, options, recheckDelay)
   }
@@ -410,7 +513,8 @@ function completionResponse(mission) {
   }, null, 2)
 }
 
-export const MissionPlugin = async ({ client }, options = {}) => {
+export const MissionPlugin = async ({ client }, rawOptions = {}) => {
+  const options = normalizePluginOptions(rawOptions)
   const stateDir = options.state_dir ? String(options.state_dir) : defaultStateDir()
   const commandName = String(options.command_name || DEFAULT_COMMAND)
   const aliasName = options.alias === false ? null : String(options.alias || DEFAULT_ALIAS)
@@ -624,4 +728,3 @@ export const MissionPlugin = async ({ client }, options = {}) => {
     },
   }
 }
-

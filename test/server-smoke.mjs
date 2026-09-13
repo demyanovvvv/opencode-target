@@ -25,6 +25,11 @@ const client = {
 }
 
 try {
+  await assert.rejects(
+    () => MissionPlugin({ client }, { state_dir: stateDir, min_continue_interval_ms: "soon" }),
+    /min_continue_interval_ms/,
+  )
+
   const hooks = await MissionPlugin({ client }, { state_dir: stateDir, auto_continue: false, max_mission_token_budget: 1000 })
   const config = {}
   await hooks.config(config)
@@ -33,6 +38,27 @@ try {
   assert.ok(hooks.tool.get_mission)
   assert.ok(hooks.tool.create_mission)
   assert.ok(hooks.tool.update_mission)
+
+  const doctorOutput = { parts: [] }
+  await hooks["command.execute.before"]({ command: "mission", sessionID: "doctor", arguments: "doctor" }, doctorOutput)
+  assert.match(doctorOutput.parts[0].text, /Mission diagnostics/)
+  assert.match(doctorOutput.parts[0].text, /state: ok/)
+  assert.match(doctorOutput.parts[0].text, /messages API: ok/)
+  assert.match(doctorOutput.parts[0].text, /children API: ok/)
+
+  const failingClient = {
+    app: client.app,
+    session: {
+      messages: async () => { throw new Error("messages unavailable") },
+      children: async () => { throw new Error("children unavailable") },
+      prompt: client.session.prompt,
+    },
+  }
+  const failingHooks = await MissionPlugin({ client: failingClient }, { state_dir: stateDir, auto_continue: false })
+  const failingDoctorOutput = { parts: [] }
+  await failingHooks["command.execute.before"]({ command: "mission", sessionID: "doctor-errors", arguments: "doctor" }, failingDoctorOutput)
+  assert.match(failingDoctorOutput.parts[0].text, /messages API: error/)
+  assert.match(failingDoctorOutput.parts[0].text, /children API: error/)
 
   const output = { parts: [{ type: "text", text: "old" }] }
   await hooks["command.execute.before"]({ command: "mission", sessionID: "s", arguments: "Ship verified feature" }, output)
