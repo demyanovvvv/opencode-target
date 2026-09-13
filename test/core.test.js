@@ -537,6 +537,8 @@ test("Mission journal and report explain lifecycle and missing requirements", as
     assert.equal(report.status, "active")
     assert.deepEqual(report.missingRequirements, ["tests"])
     assert.ok(report.historyLength >= 1)
+    assert.deepEqual(report.verificationSummary, { total: 0, passed: 0, failed: 0, attempts: 0 })
+    assert.deepEqual(report.unresolvedRisks, ["Missing evidence: tests"])
   })
 })
 

@@ -63,6 +63,10 @@ Run configured verification gates explicitly with `/mission verify` or `/mission
 Gate commands come from trusted plugin configuration and execute in the current project directory.
 A failed gate leaves its linked requirement open.
 
+Mission also refreshes the Git fingerprint at idle and before model completion. If files changed
+after a successful verification, `/mission report` and `/mission status` expose the resulting stale
+or missing evidence and completion is rejected until the requirement is verified again.
+
 Verification retry settings are `maxAttempts`, `baseDelayMs`, and `maxDelayMs`. Keep them bounded;
 retries are intended for transient host/provider failures, not for ordinary test or lint failures.
 Use `/mission explain` to inspect the recorded attempt count.

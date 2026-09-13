@@ -652,6 +652,21 @@ async function getMissionHistory(stateDir, sessionID) {
 async function missionReport(stateDir, sessionID) {
   const mission = await readMission(stateDir, sessionID)
   if (!mission) return null
+  const verificationEvents = mission.journal.filter((event) => event.type === "verification_finished")
+  const verificationSummary = verificationEvents.reduce((summary, event) => {
+    summary.total += 1
+    summary.attempts += Math.max(1, Number(event.details?.attempts) || 1)
+    if (event.details?.passed === true) summary.passed += 1
+    else summary.failed += 1
+    return summary
+  }, { total: 0, passed: 0, failed: 0, attempts: 0 })
+  const unresolvedRisks = []
+  for (const requirement of mission.requirements) {
+    if (requirement.status !== "verified") unresolvedRisks.push(`Missing evidence: ${requirement.id}`)
+    if (requirement.evidence.some((entry) => entry.stale)) unresolvedRisks.push(`Stale evidence: ${requirement.id}`)
+    if (requirement.evidence.some((entry) => entry.passed === false)) unresolvedRisks.push(`Failed verification: ${requirement.id}`)
+  }
+  if (mission.stopReason) unresolvedRisks.push(`Stop reason: ${mission.stopReason}`)
   return {
     missionID: mission.missionID,
     objective: mission.objective,
@@ -663,6 +678,8 @@ async function missionReport(stateDir, sessionID) {
     missingRequirements: mission.requirements.filter((item) => item.status !== "verified").map((item) => item.id),
     historyLength: mission.journal.length,
     checkpoints: mission.checkpoints,
+    verificationSummary,
+    unresolvedRisks,
   }
 }
 
@@ -1536,6 +1553,7 @@ export function normalizePluginOptions(options = {}) {
   return Object.freeze({
     ...options,
     state_dir: options.state_dir == null ? null : String(options.state_dir),
+    worktree: options.worktree == null ? null : String(options.worktree),
     command_name: commandName,
     alias,
     auto_continue: options.auto_continue ?? true,
@@ -1819,6 +1837,7 @@ async function processIdle(client, stateDir, sessionID, options) {
     let mission = await readMission(stateDir, sessionID)
     if (!mission) return
     const expectedMissionID = mission.missionID
+    mission = await refreshMissionEvidence(stateDir, sessionID, await getWorktreeFingerprint(options.worktree), expectedMissionID) || mission
     leaseOwner = newSchedulerOwnerID()
     const lease = await acquireSchedulerLease(stateDir, sessionID, leaseOwner, {
       expectedMissionID,
@@ -2023,6 +2042,7 @@ export const MissionPlugin = async ({ client, $, directory }, rawOptions = {}) =
           let mission = await readMission(stateDir, context.sessionID)
           if (!mission) throw new Error("No Mission exists for this session.")
           const expectedMissionID = mission.missionID
+          mission = await refreshMissionEvidence(stateDir, context.sessionID, await getWorktreeFingerprint(context.worktree), expectedMissionID) || mission
 
           // Mirror Codex: account the live turn before applying a stopped/completed status.
           mission = (await accountLiveMission(client, stateDir, context.sessionID, expectedMissionID, options)) || mission

@@ -235,6 +235,7 @@ export function normalizePluginOptions(options = {}) {
   return Object.freeze({
     ...options,
     state_dir: options.state_dir == null ? null : String(options.state_dir),
+    worktree: options.worktree == null ? null : String(options.worktree),
     command_name: commandName,
     alias,
     auto_continue: options.auto_continue ?? true,
@@ -518,6 +519,7 @@ async function processIdle(client, stateDir, sessionID, options) {
     let mission = await readMission(stateDir, sessionID)
     if (!mission) return
     const expectedMissionID = mission.missionID
+    mission = await refreshMissionEvidence(stateDir, sessionID, await getWorktreeFingerprint(options.worktree), expectedMissionID) || mission
     leaseOwner = newSchedulerOwnerID()
     const lease = await acquireSchedulerLease(stateDir, sessionID, leaseOwner, {
       expectedMissionID,
@@ -722,6 +724,7 @@ export const MissionPlugin = async ({ client, $, directory }, rawOptions = {}) =
           let mission = await readMission(stateDir, context.sessionID)
           if (!mission) throw new Error("No Mission exists for this session.")
           const expectedMissionID = mission.missionID
+          mission = await refreshMissionEvidence(stateDir, context.sessionID, await getWorktreeFingerprint(context.worktree), expectedMissionID) || mission
 
           // Mirror Codex: account the live turn before applying a stopped/completed status.
           mission = (await accountLiveMission(client, stateDir, context.sessionID, expectedMissionID, options)) || mission

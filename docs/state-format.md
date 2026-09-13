@@ -44,6 +44,7 @@ current shape before using it.
 | `evidenceFingerprint` | string or null | Last worktree fingerprint associated with evidence. A changed fingerprint invalidates prior evidence. |
 | `journal` | array | Bounded lifecycle decision history, limited to the most recent 200 events. |
 | `checkpoints` | array | Bounded manual checkpoint metadata; checkpoints never create commits or perform rollback. |
+| `verificationSummary` | object | Report-only aggregate of persisted verification events: total, passed, failed, and attempts. |
 | `continuationDeferrals` | integer | Pending one-shot deferrals from control commands. |
 | `lastContinuationAtMs` | number or null | Timestamp of the latest continuation start. |
 | `lastError` | string or null | Latest runtime error, when present. |

@@ -650,6 +650,21 @@ export async function getMissionHistory(stateDir, sessionID) {
 export async function missionReport(stateDir, sessionID) {
   const mission = await readMission(stateDir, sessionID)
   if (!mission) return null
+  const verificationEvents = mission.journal.filter((event) => event.type === "verification_finished")
+  const verificationSummary = verificationEvents.reduce((summary, event) => {
+    summary.total += 1
+    summary.attempts += Math.max(1, Number(event.details?.attempts) || 1)
+    if (event.details?.passed === true) summary.passed += 1
+    else summary.failed += 1
+    return summary
+  }, { total: 0, passed: 0, failed: 0, attempts: 0 })
+  const unresolvedRisks = []
+  for (const requirement of mission.requirements) {
+    if (requirement.status !== "verified") unresolvedRisks.push(`Missing evidence: ${requirement.id}`)
+    if (requirement.evidence.some((entry) => entry.stale)) unresolvedRisks.push(`Stale evidence: ${requirement.id}`)
+    if (requirement.evidence.some((entry) => entry.passed === false)) unresolvedRisks.push(`Failed verification: ${requirement.id}`)
+  }
+  if (mission.stopReason) unresolvedRisks.push(`Stop reason: ${mission.stopReason}`)
   return {
     missionID: mission.missionID,
     objective: mission.objective,
@@ -661,6 +676,8 @@ export async function missionReport(stateDir, sessionID) {
     missingRequirements: mission.requirements.filter((item) => item.status !== "verified").map((item) => item.id),
     historyLength: mission.journal.length,
     checkpoints: mission.checkpoints,
+    verificationSummary,
+    unresolvedRisks,
   }
 }
 

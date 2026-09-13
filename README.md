@@ -430,6 +430,8 @@ Verification evidence includes a best-effort worktree fingerprint made from `git
 `git status --porcelain`. When the fingerprint changes, previous evidence becomes stale and the
 linked requirement must be verified again. Use `/mission checkpoint [summary]` to save bounded
 checkpoint metadata without creating commits or rolling files back.
+Mission also refreshes the fingerprint automatically at session idle and before a model completion
+request, so evidence can become stale without `/mission verify` being the next command.
 
 Verification gates may define a bounded retry policy:
 
@@ -440,6 +442,9 @@ Verification gates may define a bounded retry policy:
 
 Only transient timeout and network/provider errors are retried. A normal non-zero command exit is
 recorded as failed without repeating the command.
+
+`/mission report` includes verification totals, total attempts, missing/stale evidence, failed gates,
+and runtime stop reasons.
 
 ## Source layout
 
