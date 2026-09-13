@@ -40,7 +40,7 @@ current shape before using it.
 | `schedulerLease` | object or null | Current continuation owner, acquisition time, and expiry. Only the matching owner may renew, release, or start the leased turn. |
 | `limits` | object | Persisted runtime limits: `maxAutomaticTurns`, `maxActiveSeconds`, and `maxNoProgressTurns`; each is a positive integer or null. |
 | `requirements` | array | Declared acceptance requirements. Each item has an `id`, `text`, `status`, and bounded evidence list. |
-| `verification` | array | Trusted configured gates with `id`, `command`, and optional `requirementID`. |
+| `verification` | array | Trusted configured gates with `id`, `command`, optional `requirementID`, and bounded retry policy. |
 | `evidenceFingerprint` | string or null | Last worktree fingerprint associated with evidence. A changed fingerprint invalidates prior evidence. |
 | `journal` | array | Bounded lifecycle decision history, limited to the most recent 200 events. |
 | `checkpoints` | array | Bounded manual checkpoint metadata; checkpoints never create commits or perform rollback. |

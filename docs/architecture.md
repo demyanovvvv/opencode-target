@@ -86,6 +86,10 @@ Verification gates are separate trusted configuration. The OpenCode adapter exec
 configured gate on an explicit request, then records its exit result as evidence. Automatic
 continuation does not execute gates implicitly.
 
+Gate retries use bounded exponential backoff and apply only to classified transient execution
+errors. Normal command failures are final for that verification request. Attempt count and whether
+a retry occurred are recorded in the lifecycle journal.
+
 The adapter computes a best-effort worktree fingerprint from Git HEAD and porcelain status before
 recording a gate result. A mismatch invalidates prior evidence. Manual checkpoints store metadata
 only; they deliberately do not mutate Git history or roll back user files.

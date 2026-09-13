@@ -431,6 +431,16 @@ Verification evidence includes a best-effort worktree fingerprint made from `git
 linked requirement must be verified again. Use `/mission checkpoint [summary]` to save bounded
 checkpoint metadata without creating commits or rolling files back.
 
+Verification gates may define a bounded retry policy:
+
+```json
+{ "id": "tests", "command": "npm test", "requirementID": "tests",
+  "retry": { "maxAttempts": 3, "baseDelayMs": 250, "maxDelayMs": 5000 } }
+```
+
+Only transient timeout and network/provider errors are retried. A normal non-zero command exit is
+recorded as failed without repeating the command.
+
 ## Source layout
 
 ```text

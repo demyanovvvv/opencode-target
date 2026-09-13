@@ -63,6 +63,10 @@ Run configured verification gates explicitly with `/mission verify` or `/mission
 Gate commands come from trusted plugin configuration and execute in the current project directory.
 A failed gate leaves its linked requirement open.
 
+Verification retry settings are `maxAttempts`, `baseDelayMs`, and `maxDelayMs`. Keep them bounded;
+retries are intended for transient host/provider failures, not for ordinary test or lint failures.
+Use `/mission explain` to inspect the recorded attempt count.
+
 Use `/mission checkpoint [summary]` before a risky phase to save a manual metadata marker. This is
 not a Git commit and does not provide automatic rollback. If a later verification reports stale
 evidence, rerun the affected gate after the worktree reaches the intended state.

@@ -27,6 +27,24 @@ const CHECKPOINT_ENTRY_LIMIT = 50
 // active Mission to this process start so application downtime is never billed.
 const PROCESS_STARTED_AT_MS = Date.now()
 
+export function normalizeRetryPolicy(value = {}) {
+  const integer = (input, fallback, minimum) => {
+    const n = Number(input)
+    return Number.isSafeInteger(n) && n >= minimum ? n : fallback
+  }
+  const maxAttempts = integer(value.maxAttempts, 1, 1)
+  const baseDelayMs = integer(value.baseDelayMs, 250, 0)
+  const maxDelayMs = Math.max(baseDelayMs, integer(value.maxDelayMs, 5000, 0))
+  return { maxAttempts, baseDelayMs, maxDelayMs }
+}
+
+export function isRetryableVerificationFailure(error) {
+  const code = String(error?.code || "").toUpperCase()
+  if (["ETIMEDOUT", "ECONNRESET", "ECONNREFUSED", "EAI_AGAIN", "ENETUNREACH"].includes(code)) return true
+  return /(?:timed? ?out|timeout|connection reset|temporar(?:y|ily) unavailable|service unavailable|try again)/i
+    .test(String(error?.message || error || ""))
+}
+
 function normalizeLimit(value) {
   if (value === undefined || value === null || value === "") return null
   const n = Number(value)
@@ -241,6 +259,7 @@ function normalizeVerification(value) {
     id: String(item?.id || `verification-${index + 1}`).trim(),
     command: String(item?.command || "").trim().slice(0, 2000),
     requirementID: item?.requirementID ? String(item.requirementID).trim() : null,
+    retry: normalizeRetryPolicy(item?.retry),
   })).filter((item) => item.id && item.command)
 }
 
@@ -695,6 +714,12 @@ export async function recordVerificationResult(
       }].slice(-20)
       requirement.status = result?.passed === true ? "verified" : "open"
     }
+    appendJournal(mission, "verification_finished", {
+      verificationID: gate.id,
+      passed: result?.passed === true,
+      attempts: Math.max(1, Number(result?.attempts) || 1),
+      retryableFailure: Boolean(result?.retryableFailure),
+    })
     mission.updatedAtMs = nowMs()
     return writeMissionUnlocked(stateDir, mission)
   })

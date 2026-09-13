@@ -29,6 +29,24 @@ const CHECKPOINT_ENTRY_LIMIT = 50
 // active Mission to this process start so application downtime is never billed.
 const PROCESS_STARTED_AT_MS = Date.now()
 
+function normalizeRetryPolicy(value = {}) {
+  const integer = (input, fallback, minimum) => {
+    const n = Number(input)
+    return Number.isSafeInteger(n) && n >= minimum ? n : fallback
+  }
+  const maxAttempts = integer(value.maxAttempts, 1, 1)
+  const baseDelayMs = integer(value.baseDelayMs, 250, 0)
+  const maxDelayMs = Math.max(baseDelayMs, integer(value.maxDelayMs, 5000, 0))
+  return { maxAttempts, baseDelayMs, maxDelayMs }
+}
+
+function isRetryableVerificationFailure(error) {
+  const code = String(error?.code || "").toUpperCase()
+  if (["ETIMEDOUT", "ECONNRESET", "ECONNREFUSED", "EAI_AGAIN", "ENETUNREACH"].includes(code)) return true
+  return /(?:timed? ?out|timeout|connection reset|temporar(?:y|ily) unavailable|service unavailable|try again)/i
+    .test(String(error?.message || error || ""))
+}
+
 function normalizeLimit(value) {
   if (value === undefined || value === null || value === "") return null
   const n = Number(value)
@@ -243,6 +261,7 @@ function normalizeVerification(value) {
     id: String(item?.id || `verification-${index + 1}`).trim(),
     command: String(item?.command || "").trim().slice(0, 2000),
     requirementID: item?.requirementID ? String(item.requirementID).trim() : null,
+    retry: normalizeRetryPolicy(item?.retry),
   })).filter((item) => item.id && item.command)
 }
 
@@ -697,6 +716,12 @@ async function recordVerificationResult(
       }].slice(-20)
       requirement.status = result?.passed === true ? "verified" : "open"
     }
+    appendJournal(mission, "verification_finished", {
+      verificationID: gate.id,
+      passed: result?.passed === true,
+      attempts: Math.max(1, Number(result?.attempts) || 1),
+      retryableFailure: Boolean(result?.retryableFailure),
+    })
     mission.updatedAtMs = nowMs()
     return writeMissionUnlocked(stateDir, mission)
   })
@@ -1485,6 +1510,7 @@ function normalizeVerificationOptions(value) {
       id,
       command,
       requirementID: item?.requirementID == null ? null : String(item.requirementID).trim(),
+      retry: normalizeRetryPolicy(item?.retry),
     }
   })
 }
@@ -1552,14 +1578,32 @@ async function missionDiagnostics(client, stateDir, sessionID) {
 
 async function executeVerificationGate($, cwd, stateDir, sessionID, mission, gate) {
   if (typeof $ !== "function") throw new Error("Verification execution is unavailable in this OpenCode runtime.")
-  const result = await $.cwd(cwd || process.cwd()).nothrow()`${{ raw: gate.command }}`
+  const policy = normalizeRetryPolicy(gate.retry)
+  let result
+  let attempts = 0
+  let lastError = null
+  while (attempts < policy.maxAttempts) {
+    attempts += 1
+    try {
+      result = await $.cwd(cwd || process.cwd()).nothrow()`${{ raw: gate.command }}`
+      break
+    } catch (error) {
+      lastError = error
+      if (!isRetryableVerificationFailure(error) || attempts >= policy.maxAttempts) throw error
+      const delay = Math.min(policy.maxDelayMs, policy.baseDelayMs * (2 ** (attempts - 1)))
+      await new Promise((resolve) => setTimeout(resolve, delay))
+    }
+  }
+  if (!result && lastError) throw lastError
   const fingerprint = await getWorktreeFingerprint(cwd)
   mission = await refreshMissionEvidence(stateDir, sessionID, fingerprint, mission.missionID) || mission
   const output = String(result?.stdout || result?.stderr || result || "").trim()
   const passed = Number(result?.exitCode ?? result?.exit_code ?? 1) === 0
   const updated = await recordVerificationResult(stateDir, sessionID, gate.id, {
-    passed,
-    summary: `${gate.command}: ${passed ? "passed" : "failed"}${output ? ` — ${output.slice(0, 700)}` : ""}`,
+            passed,
+            attempts,
+            retryableFailure: attempts > 1,
+    summary: `${gate.command}: ${passed ? "passed" : "failed"} (attempts: ${attempts})${output ? ` — ${output.slice(0, 700)}` : ""}`,
     fingerprint,
   }, mission.missionID)
   if (!updated) throw new Error("Mission changed concurrently; verification result rejected.")

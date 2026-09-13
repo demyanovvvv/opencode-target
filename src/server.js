@@ -29,6 +29,8 @@ import {
   readMission,
   recordMissionTurnOutcome,
   recordVerificationResult,
+  isRetryableVerificationFailure,
+  normalizeRetryPolicy,
   releaseSchedulerLease,
   renewSchedulerLease,
   resumeMission,
@@ -207,6 +209,7 @@ function normalizeVerificationOptions(value) {
       id,
       command,
       requirementID: item?.requirementID == null ? null : String(item.requirementID).trim(),
+      retry: normalizeRetryPolicy(item?.retry),
     }
   })
 }
@@ -274,14 +277,32 @@ async function missionDiagnostics(client, stateDir, sessionID) {
 
 async function executeVerificationGate($, cwd, stateDir, sessionID, mission, gate) {
   if (typeof $ !== "function") throw new Error("Verification execution is unavailable in this OpenCode runtime.")
-  const result = await $.cwd(cwd || process.cwd()).nothrow()`${{ raw: gate.command }}`
+  const policy = normalizeRetryPolicy(gate.retry)
+  let result
+  let attempts = 0
+  let lastError = null
+  while (attempts < policy.maxAttempts) {
+    attempts += 1
+    try {
+      result = await $.cwd(cwd || process.cwd()).nothrow()`${{ raw: gate.command }}`
+      break
+    } catch (error) {
+      lastError = error
+      if (!isRetryableVerificationFailure(error) || attempts >= policy.maxAttempts) throw error
+      const delay = Math.min(policy.maxDelayMs, policy.baseDelayMs * (2 ** (attempts - 1)))
+      await new Promise((resolve) => setTimeout(resolve, delay))
+    }
+  }
+  if (!result && lastError) throw lastError
   const fingerprint = await getWorktreeFingerprint(cwd)
   mission = await refreshMissionEvidence(stateDir, sessionID, fingerprint, mission.missionID) || mission
   const output = String(result?.stdout || result?.stderr || result || "").trim()
   const passed = Number(result?.exitCode ?? result?.exit_code ?? 1) === 0
   const updated = await recordVerificationResult(stateDir, sessionID, gate.id, {
-    passed,
-    summary: `${gate.command}: ${passed ? "passed" : "failed"}${output ? ` — ${output.slice(0, 700)}` : ""}`,
+            passed,
+            attempts,
+            retryableFailure: attempts > 1,
+    summary: `${gate.command}: ${passed ? "passed" : "failed"} (attempts: ${attempts})${output ? ` — ${output.slice(0, 700)}` : ""}`,
     fingerprint,
   }, mission.missionID)
   if (!updated) throw new Error("Mission changed concurrently; verification result rejected.")

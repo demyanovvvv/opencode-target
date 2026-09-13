@@ -29,6 +29,8 @@ import {
   renewSchedulerLease,
   resumeMission,
   refreshMissionEvidence,
+  normalizeRetryPolicy,
+  isRetryableVerificationFailure,
   seedMissionUsageBaselines,
   setMissionBudget,
   setStoppedStatus,
@@ -494,8 +496,10 @@ test("configured verification gates are persisted and record pass/fail evidence"
     const failed = await recordVerificationResult(dir, "s", "unit", {
       passed: false,
       summary: "npm test: 1 failed",
+      attempts: 2,
     }, mission.missionID)
     assert.equal(failed.requirements[0].status, "open")
+    assert.equal((await getMissionHistory(dir, "s")).at(-1).attempts, 2)
     const passed = await recordVerificationResult(dir, "s", "unit", {
       passed: true,
       summary: "npm test: all passed",
@@ -548,4 +552,16 @@ test("manual checkpoints persist bounded metadata without changing lifecycle", a
     assert.equal(checkpoint.checkpoints[0].fingerprint, "tree-a")
     assert.equal((await listMissionCheckpoints(dir, "s")).length, 1)
   })
+})
+
+test("retry policy normalizes bounds and classifies only transient failures", () => {
+  assert.deepEqual(normalizeRetryPolicy({ maxAttempts: 4, baseDelayMs: 10, maxDelayMs: 100 }), {
+    maxAttempts: 4,
+    baseDelayMs: 10,
+    maxDelayMs: 100,
+  })
+  assert.equal(normalizeRetryPolicy({ maxAttempts: 0 }).maxAttempts, 1)
+  assert.equal(isRetryableVerificationFailure({ code: "ETIMEDOUT" }), true)
+  assert.equal(isRetryableVerificationFailure({ code: "ENOENT" }), false)
+  assert.equal(isRetryableVerificationFailure(new Error("connection reset by peer")), true)
 })
