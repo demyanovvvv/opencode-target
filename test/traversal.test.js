@@ -40,6 +40,22 @@ test("collectSessionUsage traverses nested sessions breadth-first and deduplicat
   ])
 })
 
+test("collectSessionUsage accepts all supported child session identity fields", async () => {
+  const host = {
+    async children(sessionID) {
+      return sessionID === "root"
+        ? [{ sessionID: "child-a" }, { sessionId: "child-b" }, { id: "child-c" }]
+        : []
+    },
+    async messages(sessionID) {
+      return [{ info: { id: `message-${sessionID}` } }]
+    },
+  }
+
+  const samples = await collectSessionUsage(host, "root")
+  assert.deepEqual(samples.map((sample) => sample.sessionID), ["root", "child-a", "child-b", "child-c"])
+})
+
 test("collectSessionUsage fails closed when depth would omit descendants", async () => {
   const host = adapter({ root: ["child"], child: ["grandchild"], grandchild: [] })
 

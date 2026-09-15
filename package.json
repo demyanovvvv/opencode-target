@@ -1,6 +1,6 @@
 {
   "name": "opencode-mission",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Persistent Codex-style Mission runtime for OpenCode: verified multi-turn objectives, budgets, auto-continuation, and circuit breakers.",
   "type": "module",
   "main": "./src/server.js",
@@ -41,7 +41,8 @@
     "test:unit": "node --test test/core.test.js test/adapter.test.js test/store.test.js test/ledger.test.js test/scheduler.test.js test/traversal.test.js",
     "test:smoke": "node test/server-smoke.mjs && node test/continuation-smoke.mjs && node test/budget-wrapup-smoke.mjs && node test/restart-smoke.mjs",
     "test": "npm run test:unit && npm run test:smoke",
-    "check": "npm run build:local && node --check src/core.js && node --check src/server.js && node --check src/store.js && node --check src/ledger.js && node --check src/adapter.js && node --check src/scheduler.js && node --check src/traversal.js && node --check dist/mission.js && node -e \"import('./dist/mission.js').then(m => { if (typeof m.MissionPlugin !== 'function') process.exit(1) })\" && npm run test"
+    "check": "npm run build:local && node --check src/core.js && node --check src/server.js && node --check src/store.js && node --check src/ledger.js && node --check src/adapter.js && node --check src/scheduler.js && node --check src/traversal.js && node --check dist/mission.js && node -e \"import('./dist/mission.js').then(m => { if (typeof m.MissionPlugin !== 'function') process.exit(1) })\" && npm run test",
+    "release:check": "node scripts/release-check.mjs"
   },
   "license": "MIT"
 }

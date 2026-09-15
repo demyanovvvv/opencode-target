@@ -475,7 +475,8 @@ npm install
 npm run check
 ```
 
-The full test command includes the core unit suite and both plugin smoke suites. Maintainer and
+The full test command includes the core unit suite and server, continuation, budget-wrap-up, and
+restart recovery smoke suites. Maintainer and
 operator procedures are documented in:
 
 - [`docs/contributing.md`](docs/contributing.md)

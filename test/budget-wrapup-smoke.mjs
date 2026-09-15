@@ -60,8 +60,11 @@ try {
   await hooks.event({ event: { type: "session.idle", properties: { sessionID: "budget-wrapup" } } })
 
   const deadline = Date.now() + 2_000
-  while (promptAttempts < 2 && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 10))
-  const mission = await readMission(stateDir, "budget-wrapup")
+  let mission = await readMission(stateDir, "budget-wrapup")
+  while (Date.now() < deadline && (promptAttempts < 2 || !mission?.budgetWrapupSent)) {
+    await new Promise((resolve) => setTimeout(resolve, 10))
+    mission = await readMission(stateDir, "budget-wrapup")
+  }
   assert.equal(promptAttempts, 2)
   assert.equal(mission.status, "budget_limited")
   assert.equal(mission.budgetWrapupSent, true)

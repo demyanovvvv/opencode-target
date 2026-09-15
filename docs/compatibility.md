@@ -39,6 +39,8 @@ npm run check
 - Automatic continuation accepts only the SDK prompt response shape containing assistant `info` and
   a `parts` array. Malformed prompt responses are typed failures and follow the configured bounded
   continuation retry policy.
+- The release validation installs the pinned development target `@opencode-ai/plugin@1.18.30` into
+  a temporary project and imports the packed package before release claims are made.
 
 ## Upgrade policy
 

@@ -677,14 +677,19 @@ test("configured verification gates are persisted and record pass/fail evidence"
       requirements: [{ id: "tests", text: "Tests pass" }],
       verification: [{ id: "unit", command: "npm test", requirementID: "tests" }],
     })
-    assert.deepEqual(mission.verification, [{ id: "unit", command: "npm test", requirementID: "tests" }])
+    assert.deepEqual(mission.verification, [{
+      id: "unit",
+      command: "npm test",
+      requirementID: "tests",
+      retry: { maxAttempts: 1, baseDelayMs: 250, maxDelayMs: 5000 },
+    }])
     const failed = await recordVerificationResult(dir, "s", "unit", {
       passed: false,
       summary: "npm test: 1 failed",
       attempts: 2,
     }, mission.missionID)
     assert.equal(failed.requirements[0].status, "open")
-    assert.equal((await getMissionHistory(dir, "s")).at(-1).attempts, 2)
+    assert.equal((await getMissionHistory(dir, "s")).at(-1).details.attempts, 2)
     const passed = await recordVerificationResult(dir, "s", "unit", {
       passed: true,
       summary: "npm test: all passed",

@@ -18,6 +18,18 @@ test("MissionStore writes atomically and reads JSON state", async () => {
   })
 })
 
+test("MissionStore encodes session IDs without path traversal or collisions", async () => {
+  await withStore(async (store) => {
+    const traversal = store.path("..\\..\\outside/session")
+    const plain = store.path("outside/session")
+    assert.notEqual(traversal, plain)
+    assert.equal(path.dirname(traversal), path.join(store.stateDir, "missions"))
+    assert.equal(path.dirname(plain), path.join(store.stateDir, "missions"))
+    await store.write("..\\..\\outside/session", { value: 1 })
+    assert.deepEqual(await store.read("..\\..\\outside/session"), { value: 1 })
+  })
+})
+
 test("MissionStore quarantines corrupt JSON and exposes a typed error", async () => {
   await withStore(async (store) => {
     await mkdir(path.dirname(store.path("broken")), { recursive: true })

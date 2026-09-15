@@ -15,6 +15,7 @@ Run from a clean checkout or clean working tree:
 ```text
 npm install
 npm run check
+npm run release:check
 ```
 
 Confirm that:
@@ -23,6 +24,9 @@ Confirm that:
 - unit tests and all smoke suites pass, including budget-wrap-up and restart recovery coverage;
 - `dist/mission.js` contains the current source behavior;
 - no state files, lock files, credentials, or local configuration are packaged.
+- two consecutive local builds produce the same generated artifact hash;
+- the packed tarball installs into a temporary project and contains no tests, state, lock files, or
+  project-local agent configuration.
 
 Project-local agent skills under `.opencode/skills/` are repository guidance for maintainers and
 agents. They are intentionally not part of the npm package artifact; npm consumers use the plugin
