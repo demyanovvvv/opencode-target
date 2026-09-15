@@ -1,9 +1,12 @@
 import { randomUUID } from "node:crypto"
-import { mkdir, open, readFile, rename, rm, stat, unlink, writeFile } from "node:fs/promises"
+import { rm } from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
+import { MissionStore } from "./store.js"
+import { UsageLedger, extractLedgerUsage } from "./ledger.js"
 
 export const SCHEMA_VERSION = 3
+const SUPPORTED_SCHEMA_VERSIONS = new Set([2, SCHEMA_VERSION])
 export const MAX_OBJECTIVE_CHARS = 4000
 export const MISSION_STATUSES = Object.freeze([
   "active",
@@ -16,10 +19,6 @@ export const MISSION_STATUSES = Object.freeze([
 export const STOPPED_STATUSES = new Set(["paused", "blocked", "usage_limited", "budget_limited", "complete"])
 export const TERMINAL_STATUSES = new Set(["budget_limited", "complete"])
 
-const LOCK_STALE_MS = 15_000
-const LOCK_HEARTBEAT_MS = 5_000
-const LOCK_RETRIES = 120
-const LOCK_RETRY_MS = 25
 const ACCOUNTING_ENTRY_LIMIT = 12_000
 const JOURNAL_ENTRY_LIMIT = 200
 const CHECKPOINT_ENTRY_LIMIT = 50
@@ -112,52 +111,8 @@ export function missionPath(stateDir, sessionID) {
   return path.join(stateDir, "missions", `${safeSessionName(sessionID)}.json`)
 }
 
-function lockPath(stateDir, sessionID) {
-  return path.join(stateDir, "locks", `${safeSessionName(sessionID)}.lock`)
-}
-
-async function ensureDirs(stateDir) {
-  await Promise.all([
-    mkdir(path.join(stateDir, "missions"), { recursive: true }),
-    mkdir(path.join(stateDir, "locks"), { recursive: true }),
-  ])
-}
-
 export async function withSessionLock(stateDir, sessionID, fn) {
-  await ensureDirs(stateDir)
-  const file = lockPath(stateDir, sessionID)
-  for (let i = 0; i < LOCK_RETRIES; i++) {
-    let handle
-    try {
-      handle = await open(file, "wx", 0o600)
-      const owner = `${process.pid}:${randomUUID()}`
-      await handle.writeFile(JSON.stringify({ owner, pid: process.pid, createdAtMs: Date.now() }))
-      const heartbeat = setInterval(() => {
-        void handle.utimes(new Date(), new Date()).catch(() => {})
-      }, LOCK_HEARTBEAT_MS)
-      try {
-        return await fn()
-      } finally {
-        clearInterval(heartbeat)
-        await handle.close().catch(() => {})
-        const current = await readFile(file, "utf8").catch(() => "")
-        if (current.includes(owner)) await unlink(file).catch(() => {})
-      }
-    } catch (error) {
-      if (error?.code !== "EEXIST") throw error
-      try {
-        const s = await stat(file)
-        if (Date.now() - s.mtimeMs > LOCK_STALE_MS) {
-          await unlink(file).catch(() => {})
-          continue
-        }
-      } catch {
-        // Lock disappeared between EEXIST and stat.
-      }
-      await sleep(LOCK_RETRY_MS)
-    }
-  }
-  throw new Error(`Timed out acquiring Mission state lock for session ${sessionID}`)
+  return new MissionStore(stateDir).withLock(sessionID, fn)
 }
 
 export function normalizeObjective(value) {
@@ -286,18 +241,29 @@ function normalizeCheckpoints(value) {
 
 export function normalizeMission(mission) {
   if (!mission || typeof mission !== "object") throw new Error("Invalid Mission state.")
-  const status = MISSION_STATUSES.includes(mission.status) ? mission.status : "active"
+  if (!Number.isSafeInteger(mission.version) || !SUPPORTED_SCHEMA_VERSIONS.has(mission.version)) {
+    throw new Error("Unsupported Mission schema version.")
+  }
+  if (!MISSION_STATUSES.includes(mission.status)) throw new Error("Invalid Mission status.")
+  if (typeof mission.sessionID !== "string" || !mission.sessionID.trim()) {
+    throw new Error("Invalid Mission session identity.")
+  }
+  if (typeof mission.missionID !== "string" || !mission.missionID.trim()) {
+    throw new Error("Invalid Mission identity.")
+  }
+  const status = mission.status
   const at = nowMs()
   const usageByMessage = normalizedUsageMap(mission.usageByMessage)
   const usageKeys = Object.keys(usageByMessage)
-  const trimmedUsage = usageKeys.length > ACCOUNTING_ENTRY_LIMIT
+  const usageWasTrimmed = usageKeys.length > ACCOUNTING_ENTRY_LIMIT
+  const trimmedUsage = usageWasTrimmed
     ? Object.fromEntries(usageKeys.slice(-ACCOUNTING_ENTRY_LIMIT).map((key) => [key, usageByMessage[key]]))
     : usageByMessage
 
   return {
     version: SCHEMA_VERSION,
     sessionID: String(mission.sessionID),
-    missionID: String(mission.missionID || randomUUID()),
+    missionID: mission.missionID.trim(),
     objective: normalizeObjective(mission.objective),
     status,
     tokenBudget: normalizeTokenBudget(mission.tokenBudget),
@@ -331,29 +297,32 @@ export function normalizeMission(mission) {
     budgetWrapupSent: Boolean(mission.budgetWrapupSent),
     schedulerLease: normalizeSchedulerLease(mission.schedulerLease),
     usageByMessage: trimmedUsage,
+    accounting: {
+      trackedMessages: Object.keys(trimmedUsage).length,
+      maxEntries: ACCOUNTING_ENTRY_LIMIT,
+      truncated: Boolean(mission.accounting?.truncated || usageWasTrimmed),
+    },
     runtime: normalizeRuntime(mission.runtime),
   }
 }
 
 export async function readMission(stateDir, sessionID) {
-  const file = missionPath(stateDir, sessionID)
+  const store = new MissionStore(stateDir)
   let raw
   try {
-    raw = await readFile(file, "utf8")
+    raw = await store.read(sessionID)
   } catch (error) {
     if (error?.code === "ENOENT") return null
     throw error
   }
   try {
-    return normalizeMission(JSON.parse(raw))
+    if (raw === null) return null
+    const mission = normalizeMission(raw)
+    if (mission.sessionID !== String(sessionID)) throw new Error("Mission session identity does not match its state file.")
+    return mission
   } catch (error) {
-    const quarantineDir = path.join(stateDir, "corrupt")
-    await mkdir(quarantineDir, { recursive: true })
-    const quarantine = path.join(
-      quarantineDir,
-      `${path.basename(file)}.${Date.now()}.${randomUUID()}.corrupt`,
-    )
-    await rename(file, quarantine)
+    if (error?.code === "MISSION_STATE_CORRUPT") throw error
+    const quarantine = await store.quarantine(sessionID)
     const diagnostic = new Error(`Mission state is corrupt and was quarantined: ${quarantine}`)
     diagnostic.code = "MISSION_STATE_CORRUPT"
     diagnostic.cause = error
@@ -362,12 +331,8 @@ export async function readMission(stateDir, sessionID) {
 }
 
 async function writeMissionUnlocked(stateDir, mission) {
-  await ensureDirs(stateDir)
   const normalized = normalizeMission(mission)
-  const file = missionPath(stateDir, normalized.sessionID)
-  const temp = `${file}.${process.pid}.${randomUUID()}.tmp`
-  await writeFile(temp, JSON.stringify(normalized, null, 2) + "\n", { encoding: "utf8", mode: 0o600 })
-  await rename(temp, file)
+  await new MissionStore(stateDir).write(normalized.sessionID, normalized)
   return normalized
 }
 
@@ -376,10 +341,7 @@ export async function writeMission(stateDir, mission) {
 }
 
 export async function deleteMission(stateDir, sessionID) {
-  return withSessionLock(stateDir, sessionID, async () => {
-    await rm(missionPath(stateDir, sessionID), { force: true })
-    return true
-  })
+  return new MissionStore(stateDir).remove(sessionID)
 }
 
 function freezeClock(mission, at = nowMs()) {
@@ -491,7 +453,7 @@ export async function createMission(
   sessionID,
   objective,
   tokenBudget = null,
-  { maxTokenBudget = null, defaultTokenBudget = null, maxAutomaticTurns = null, maxActiveSeconds = null, maxNoProgressTurns = null, requirements = [], verification = [] } = {},
+  { maxTokenBudget = null, defaultTokenBudget = null, maxAutomaticTurns = null, maxActiveSeconds = null, maxNoProgressTurns = null, requirements = [], verification = [], baselineSamples = [] } = {},
 ) {
   return withSessionLock(stateDir, sessionID, async () => {
     const existing = await readMission(stateDir, sessionID)
@@ -505,6 +467,19 @@ export async function createMission(
     const created = newMission(sessionID, objective, budget)
     created.requirements = normalizeRequirements(requirements)
     created.verification = normalizeVerification(verification)
+    const ledger = new UsageLedger({
+      createdAtMs: 0,
+      rootSessionID: sessionID,
+      maxEntries: ACCOUNTING_ENTRY_LIMIT,
+    })
+    ledger.record(baselineSamples)
+    if (ledger.truncated) {
+      const error = new Error(`Mission usage baseline exceeds the ${ACCOUNTING_ENTRY_LIMIT}-message watermark capacity.`)
+      error.code = "MISSION_BASELINE_TOO_LARGE"
+      throw error
+    }
+    created.usageByMessage = Object.fromEntries(ledger.usageByMessage)
+    created.accounting = ledger.completeness()
     appendJournal(created, "created", { objective: created.objective })
     created.limits = {
       maxAutomaticTurns: normalizeLimit(maxAutomaticTurns),
@@ -629,6 +604,7 @@ export async function refreshMissionEvidence(stateDir, sessionID, fingerprint, e
     const mission = await readMission(stateDir, sessionID)
     if (!mission || !ensureExpectedMission(mission, expectedMissionID)) return null
     const value = String(fingerprint || "")
+    if (!value) return mission
     if (value && mission.evidenceFingerprint && value !== mission.evidenceFingerprint) {
       for (const requirement of mission.requirements) {
         for (const evidence of requirement.evidence) evidence.stale = true
@@ -665,6 +641,7 @@ export async function missionReport(stateDir, sessionID) {
     if (requirement.evidence.some((entry) => entry.passed === false)) unresolvedRisks.push(`Failed verification: ${requirement.id}`)
   }
   if (mission.stopReason) unresolvedRisks.push(`Stop reason: ${mission.stopReason}`)
+  if (mission.accounting.truncated) unresolvedRisks.push("Usage accounting watermark history was truncated")
   return {
     missionID: mission.missionID,
     objective: mission.objective,
@@ -678,6 +655,7 @@ export async function missionReport(stateDir, sessionID) {
     checkpoints: mission.checkpoints,
     verificationSummary,
     unresolvedRisks,
+    accounting: mission.accounting,
   }
 }
 
@@ -795,36 +773,8 @@ export async function consumeContinuationDeferral(stateDir, sessionID, expectedM
   })
 }
 
-function isPlanMode(info) {
-  const mode = String(info?.mode || "").toLowerCase()
-  const agent = String(info?.agent || "").toLowerCase()
-  return mode === "plan" || agent === "plan"
-}
-
 export function extractAssistantUsage(message, { excludePlanMode = true } = {}) {
-  const info = message?.info ?? message
-  if (!info || info.role !== "assistant") return null
-  if (excludePlanMode && isPlanMode(info)) {
-    return {
-      id: String(info.id || info.messageID || ""),
-      createdAtMs: Number(info.time?.created) || 0,
-      completedAtMs: Number(info.time?.completed) || 0,
-      tokens: 0,
-      excluded: "plan_mode",
-    }
-  }
-  const tokens = info.tokens || {}
-  const cache = tokens.cache || {}
-  const input = Math.max(0, Number(tokens.input) || 0)
-  const cachedInput = Math.max(0, Number(cache.read) || 0)
-  const output = Math.max(0, Number(tokens.output) || 0)
-  return {
-    id: String(info.id || info.messageID || ""),
-    createdAtMs: Number(info.time?.created) || 0,
-    completedAtMs: Number(info.time?.completed) || 0,
-    tokens: Math.max(0, input - cachedInput) + output,
-    excluded: null,
-  }
+  return extractLedgerUsage(message, { excludePlanMode })
 }
 
 function accountingKey(sessionID, messageID) {
@@ -878,30 +828,20 @@ export async function accountMissionUsage(
     const mission = await readMission(stateDir, sessionID)
     if (!mission || !ensureExpectedMission(mission, expectedMissionID)) return null
 
-    const usageByMessage = { ...mission.usageByMessage }
-    let rootDelta = 0
-    let descendantDelta = 0
+    const ledger = new UsageLedger({
+      createdAtMs: mission.createdAtMs,
+      rootSessionID: sessionID,
+      usageByMessage: mission.usageByMessage,
+      maxEntries: ACCOUNTING_ENTRY_LIMIT,
+    })
+    const { rootDelta, descendantDelta } = ledger.record(samples, { excludePlanMode })
 
-    for (const sample of samples || []) {
-      const childSessionID = String(sample?.sessionID || sessionID)
-      const usage = extractAssistantUsage(sample?.message ?? sample, { excludePlanMode })
-      if (!usage || !usage.id) continue
-      const key = accountingKey(childSessionID, usage.id)
-      const hasSeededBaseline = Object.prototype.hasOwnProperty.call(usageByMessage, key)
-      const timestamp = usage.completedAtMs || usage.createdAtMs
-      if (timestamp && timestamp < mission.createdAtMs && !hasSeededBaseline) continue
-      const previous = Math.max(0, Number(usageByMessage[key]) || 0)
-      if (usage.tokens <= previous) continue
-      const delta = usage.tokens - previous
-      usageByMessage[key] = usage.tokens
-      if (childSessionID === sessionID) rootDelta += delta
-      else descendantDelta += delta
+    mission.usageByMessage = Object.fromEntries(ledger.usageByMessage)
+    const completeness = ledger.completeness()
+    mission.accounting = {
+      ...completeness,
+      truncated: Boolean(mission.accounting?.truncated || completeness.truncated),
     }
-
-    const keys = Object.keys(usageByMessage)
-    mission.usageByMessage = keys.length > ACCOUNTING_ENTRY_LIMIT
-      ? Object.fromEntries(keys.slice(-ACCOUNTING_ENTRY_LIMIT).map((key) => [key, usageByMessage[key]]))
-      : usageByMessage
 
     mission.rootTokensUsed += rootDelta
     mission.descendantTokensUsed += descendantDelta
@@ -994,7 +934,8 @@ export async function renewSchedulerLease(
       !mission ||
       (mission.status !== "active" && mission.status !== "budget_limited") ||
       !ensureExpectedMission(mission, expectedMissionID) ||
-      mission.schedulerLease?.owner !== String(owner)
+      mission.schedulerLease?.owner !== String(owner) ||
+      mission.schedulerLease.expiresAtMs <= at
     ) return null
     mission.schedulerLease.expiresAtMs = at + duration
     mission.updatedAtMs = Math.max(mission.updatedAtMs, at)

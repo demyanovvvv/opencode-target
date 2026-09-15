@@ -14,10 +14,19 @@ Malformed or schema-invalid state is never treated as an absent Mission. The run
 moves it to `<state_dir>/corrupt/<original>.<timestamp>.<id>.corrupt` and reports
 `MISSION_STATE_CORRUPT` so an operator can inspect or restore it explicitly.
 
+The persistence implementation uses a dedicated `MissionStore`; this does not change the on-disk
+directory layout or the public lifecycle API.
+
 ## Schema
 
 The current persisted schema version is `3`. The implementation normalizes loaded state to the
-current shape before using it.
+current shape before using it. Unknown status values are schema corruption: they are quarantined
+and never silently revived as `active` after restart. `sessionID` and `missionID` are required
+identity fields; the stored `sessionID` must also match the session file being read.
+
+Schema versions `2` and `3` are supported. Version `2` is normalized to the current version when
+the state is next written. Missing, older, non-integer, and future schema versions are quarantined
+instead of being interpreted with guessed semantics.
 
 | Field | Type | Meaning |
 |---|---|---|
@@ -45,6 +54,7 @@ current shape before using it.
 | `journal` | array | Bounded lifecycle decision history, limited to the most recent 200 events. |
 | `checkpoints` | array | Bounded manual checkpoint metadata; checkpoints never create commits or perform rollback. |
 | `verificationSummary` | object | Report-only aggregate of persisted verification events: total, passed, failed, and attempts. |
+| `accounting` | object | Watermark completeness metadata: tracked messages, entry cap, and whether history was truncated. |
 | `continuationDeferrals` | integer | Pending one-shot deferrals from control commands. |
 | `lastContinuationAtMs` | number or null | Timestamp of the latest continuation start. |
 | `lastError` | string or null | Latest runtime error, when present. |
@@ -65,7 +75,14 @@ Plan-mode messages are excluded. `usageByMessage` stores the largest observed cu
 for each message. Later observations charge only the positive delta, which prevents duplicate
 charges when OpenCode exposes partial or streaming token metadata.
 
+For a message whose creation timestamp predates the Mission, the first observation is a baseline
+even if OpenCode did not expose it during activation. Its current cumulative value is stored without
+charge; future positive deltas remain billable.
+
 The map is bounded by the implementation to prevent unbounded state-file growth.
+At Mission creation, the complete pre-Mission snapshot is installed in `usageByMessage` in the same
+locked write as the new active state. Creation is rejected with `MISSION_BASELINE_TOO_LARGE` if
+that snapshot cannot fit the watermark capacity; no partial Mission file is written.
 
 ## Safe recovery
 
@@ -73,7 +90,9 @@ The map is bounded by the implementation to prevent unbounded state-file growth.
 - Prefer `/mission pause`, `/mission budget`, `/mission resume`, or `/mission clear` over editing JSON.
 - Stop OpenCode before moving or archiving state files.
 - If a state file is malformed, preserve a copy for diagnosis and use `/mission clear` only after confirming that the Mission can be discarded.
-- A stale lock can normally be recovered automatically after the lock timeout. Do not delete a lock while another OpenCode process may still be writing.
+- A stale lock can normally be recovered automatically after the 15-second stale threshold. Lock
+  acquisition waits long enough to cross that threshold before timing out. Do not delete a lock
+  while another OpenCode process may still be writing.
 
 There is no general-purpose migration command. Schema changes must be implemented in
 `normalizeMission`, covered by tests, and documented here before release.

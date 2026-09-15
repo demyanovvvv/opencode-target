@@ -320,8 +320,11 @@ Properties:
 - cached input is subtracted;
 - plan-mode assistant messages are excluded;
 - message accounting is delta-based and idempotent, so streaming/partial updates do not double-count;
+- a pre-Mission assistant turn first exposed after activation establishes a zero-charge watermark, then only later token growth is charged;
 - root session and descendant-session usage are tracked separately;
 - descendant sessions are discovered recursively through OpenCode parent/child session relationships;
+- reaching a traversal depth/session cap fails the accounting pass instead of accepting partial usage;
+- Mission activation writes the pre-Mission usage baseline atomically with the new state;
 - the Mission budget uses the combined root + descendant total.
 
 The state records per-message cumulative usage keys only for accounting correctness; the map is bounded to prevent unbounded state-file growth.
@@ -411,8 +414,9 @@ Each session has one JSON state file. Writes use a per-session file lock plus te
 | `min_continue_interval_ms` | `250` | Minimum interval between automatic continuations |
 | `failed_exec_threshold` | `3` | Consecutive qualifying failed-exec Mission turns before runtime block |
 | `empty_auto_threshold` | `3` | Consecutive empty automatic continuations before runtime block |
-| `descendant_max_depth` | `6` | Maximum depth of child-session traversal for usage accounting |
-| `descendant_max_sessions` | `96` | Safety cap on traversed sessions per accounting pass |
+| `descendant_max_depth` | `6` | Maximum child-session depth; accounting fails closed if deeper descendants exist |
+| `descendant_max_sessions` | `96` | Session safety cap; accounting fails closed before returning a partial snapshot |
+| `accounting_retry` | `{ maxAttempts: 3, baseDelayMs: 500, maxDelayMs: 5000 }` | Bounded retry policy for transient OpenCode messages/children/prompt API failures |
 | `scheduler_lease_ms` | `30000` | Persisted continuation ownership lease; minimum 1000 ms |
 | `max_automatic_turns` | none | Runtime limit for automatic physical turns per Mission |
 | `max_active_seconds` | none | Runtime limit for active wall-clock seconds |
@@ -450,15 +454,21 @@ and runtime stop reasons.
 
 ```text
 src/core.js       durable state machine, accounting, prompts, command parser
-src/server.js     OpenCode hooks, tools, scheduler, child-session traversal
+src/store.js      atomic state store, locks, quarantine, concurrent mutation seam
+src/ledger.js     token extraction, delta watermarks, root/descendant accounting
+src/adapter.js    typed OpenCode and best-effort Git integration seams
+src/scheduler.js  instance-scoped continuation exclusion, rechecks, heartbeats
+src/traversal.js  complete bounded child-session usage traversal
+src/server.js     OpenCode hooks, tools, continuation and accounting integration
 dist/mission.js   self-contained local-plugin build
-test/core.test.js state-machine/accounting/circuit-breaker tests
+test/*.test.js    focused core, store, ledger, adapter, and scheduler unit tests
 scripts/build-local.mjs
 ```
 
 ## Development and operations
 
-Install the pinned development dependency and run the complete verification gate:
+Install the pinned development dependency and run the complete verification gate. This includes
+unit tests, server/continuation smoke tests, budget-wrap-up retry coverage, and restart recovery:
 
 ```text
 npm install

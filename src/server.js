@@ -1,6 +1,7 @@
 import { tool } from "@opencode-ai/plugin"
-import { execFile } from "node:child_process"
-import { promisify } from "node:util"
+import { createGitAdapter, createOpenCodeAdapter } from "./adapter.js"
+import { SchedulerState } from "./scheduler.js"
+import { collectSessionUsage } from "./traversal.js"
 import {
   accountMissionUsage,
   addMissionCheckpoint,
@@ -35,7 +36,6 @@ import {
   renewSchedulerLease,
   resumeMission,
   resumePrompt,
-  seedMissionUsageBaselines,
   setMissionBudget,
   setStoppedStatus,
   snapshotMission,
@@ -46,13 +46,7 @@ import {
 const PLUGIN_ID = "opencode-mission"
 const DEFAULT_COMMAND = "mission"
 const DEFAULT_ALIAS = "msn"
-const continuationInFlight = new Set()
-const continuationRechecks = new Map()
-const execFileAsync = promisify(execFile)
-
-function unwrapData(value) {
-  return value?.data ?? value
-}
+const defaultGitAdapter = createGitAdapter()
 
 function getEventSessionID(event) {
   return event?.properties?.sessionID || event?.properties?.sessionId || event?.sessionID || event?.sessionId || null
@@ -76,6 +70,12 @@ function isAbortError(text) {
   return /(?:aborted|cancelled|canceled|MessageAbortedError|AbortError|interrupted)/i.test(text)
 }
 
+function isTransientAccountingError(error) {
+  return error?.code === "OPENCODE_MESSAGES_FAILED" ||
+    error?.code === "OPENCODE_CHILDREN_FAILED" ||
+    error?.code === "OPENCODE_PROMPT_FAILED"
+}
+
 async function log(client, level, message, extra = undefined) {
   try {
     await client.app.log({
@@ -86,88 +86,18 @@ async function log(client, level, message, extra = undefined) {
   }
 }
 
-async function listMessages(client, sessionID) {
-  try {
-    const response = await client.session.messages({ path: { id: sessionID } })
-    const data = unwrapData(response)
-    return Array.isArray(data) ? data : []
-  } catch (error) {
-    const failure = new Error(`OpenCode messages API failed for session ${sessionID}: ${error?.message || String(error)}`)
-    failure.code = "OPENCODE_MESSAGES_FAILED"
-    failure.cause = error
-    throw failure
-  }
-}
+function listMessages(client, sessionID) { return (client.adapter || client).messages(sessionID) }
+function listChildren(client, sessionID) { return (client.adapter || client).children(sessionID) }
 
-async function listChildren(client, sessionID) {
-  try {
-    const response = await client.session.children({ path: { id: sessionID } })
-    const data = unwrapData(response)
-    return Array.isArray(data) ? data : []
-  } catch (error) {
-    const failure = new Error(`OpenCode children API failed for session ${sessionID}: ${error?.message || String(error)}`)
-    failure.code = "OPENCODE_CHILDREN_FAILED"
-    failure.cause = error
-    throw failure
-  }
-}
-
-/**
- * OpenCode exposes parent/child sessions rather than Codex's internal descendant
- * token accumulator. We reconstruct the same budget semantics by traversing the
- * session tree and accounting assistant-message deltas under the root Mission.
- */
-async function collectUsageSamples(
-  client,
-  rootSessionID,
-  { maxDepth = 6, maxSessions = 96 } = {},
-) {
-  const samples = []
-  const queue = [{ id: rootSessionID, depth: 0 }]
-  const seen = new Set()
-
-  while (queue.length > 0 && seen.size < maxSessions) {
-    const current = queue.shift()
-    if (!current?.id || seen.has(current.id)) continue
-    seen.add(current.id)
-
-    const messages = await listMessages(client, current.id)
-    for (const message of messages) {
-      samples.push({
-        sessionID: current.id,
-        message,
-        descendant: current.id !== rootSessionID,
-      })
-    }
-
-    if (current.depth >= maxDepth) continue
-    const children = await listChildren(client, current.id)
-    for (const child of children) {
-      const id = child?.id || child?.sessionID || child?.sessionId
-      if (id && !seen.has(String(id))) queue.push({ id: String(id), depth: current.depth + 1 })
-    }
-  }
-
-  return samples
-}
-
-async function accountLiveMission(client, stateDir, sessionID, missionID, options) {
-  const samples = await collectUsageSamples(client, sessionID, {
+async function accountLiveMission(adapter, stateDir, sessionID, missionID, options) {
+  const samples = await collectSessionUsage(adapter.adapter || adapter, sessionID, {
     maxDepth: Math.max(0, Number(options?.descendant_max_depth ?? 6)),
     maxSessions: Math.max(1, Number(options?.descendant_max_sessions ?? 96)),
   })
   return accountMissionUsage(stateDir, sessionID, samples, { expectedMissionID: missionID })
 }
 
-async function sendPrompt(client, sessionID, text) {
-  const response = await client.session.prompt({
-    path: { id: sessionID },
-    body: {
-      parts: [{ type: "text", text, synthetic: true, metadata: { source: "opencode-mission" } }],
-    },
-  })
-  return unwrapData(response)
-}
+function sendPrompt(client, sessionID, text) { return (client.adapter || client).prompt(sessionID, text) }
 
 function normalizePromptResponse(response) {
   if (!response) return null
@@ -250,6 +180,11 @@ export function normalizePluginOptions(options = {}) {
     max_active_seconds: integerOption(options, "max_active_seconds", null, 1),
     max_no_progress_turns: integerOption(options, "max_no_progress_turns", null, 1),
     verification: normalizeVerificationOptions(options.verification),
+    accounting_retry: normalizeRetryPolicy(options.accounting_retry ?? {
+      maxAttempts: 3,
+      baseDelayMs: 500,
+      maxDelayMs: 5000,
+    }),
     exec_tool_names: options.exec_tool_names?.map((name) => name.trim()),
   })
 }
@@ -258,7 +193,17 @@ async function missionDiagnostics(client, stateDir, sessionID) {
   const checks = []
   try {
     const mission = await readMission(stateDir, sessionID)
-    checks.push(`state: ok (${mission ? mission.status : "no Mission"})`)
+    if (!mission) {
+      checks.push("state: ok (no Mission)")
+    } else {
+      const lease = mission.schedulerLease
+      const leaseState = lease
+        ? lease.expiresAtMs <= Date.now() ? `expired (${lease.owner})` : `held (${lease.owner})`
+        : "none"
+      checks.push(`state: ok (${mission.status}, schema ${mission.version})`)
+      checks.push(`scheduler lease: ${leaseState}`)
+      checks.push(`accounting: ${mission.accounting.truncated ? "warning, watermark history truncated" : "ok"}`)
+    }
   } catch (error) {
     checks.push(`state: error (${error?.message || String(error)})`)
   }
@@ -312,9 +257,7 @@ async function executeVerificationGate($, cwd, stateDir, sessionID, mission, gat
 
 async function getWorktreeFingerprint(cwd) {
   try {
-    const { stdout } = await execFileAsync("git", ["rev-parse", "HEAD"], { cwd: cwd || process.cwd() })
-    const { stdout: status } = await execFileAsync("git", ["status", "--porcelain=v1"], { cwd: cwd || process.cwd() })
-    return `${stdout.trim()}|${status}`.slice(0, 4000)
+    return await defaultGitAdapter.fingerprint(cwd || process.cwd())
   } catch {
     return null
   }
@@ -385,20 +328,17 @@ async function handleSlashCommand(client, $, workspaceDirectory, stateDir, sessi
 
   if (parsed.op === "set") {
     if (!parsed.objective) throw new Error("Usage: /mission [--budget N] <objective>")
-    let mission = await createMission(
+    const baselineSamples = await collectSessionUsage(client.adapter || client, sessionID, {
+      maxDepth: Math.max(0, Number(options?.descendant_max_depth ?? 6)),
+      maxSessions: Math.max(1, Number(options?.descendant_max_sessions ?? 96)),
+    })
+    const mission = await createMission(
       stateDir,
       sessionID,
       parsed.objective,
       parsed.tokenBudget,
-      createOptions,
+      { ...createOptions, baselineSamples },
     )
-    const baselineSamples = await collectUsageSamples(client, sessionID, {
-      maxDepth: Math.max(0, Number(options?.descendant_max_depth ?? 6)),
-      maxSessions: Math.max(1, Number(options?.descendant_max_sessions ?? 96)),
-    })
-    mission = (await seedMissionUsageBaselines(stateDir, sessionID, baselineSamples, {
-      expectedMissionID: mission.missionID,
-    })) || mission
     return commandResultPrompt(`Mission activated.\n${conciseStatus(mission)}`, mission, true)
   }
 
@@ -490,35 +430,19 @@ async function recordRootTurnOutcomes(stateDir, sessionID, mission, messages, op
   return current
 }
 
-function clearScheduledRecheck(sessionID) {
-  const timer = continuationRechecks.get(sessionID)
-  if (timer) clearTimeout(timer)
-  continuationRechecks.delete(sessionID)
-}
-
-function scheduleRecheck(client, stateDir, sessionID, options, delayMs) {
-  clearScheduledRecheck(sessionID)
-  const timer = setTimeout(() => {
-    continuationRechecks.delete(sessionID)
-    void processIdle(client, stateDir, sessionID, options)
-  }, Math.max(0, delayMs))
-  continuationRechecks.set(sessionID, timer)
-}
-
-async function processIdle(client, stateDir, sessionID, options) {
-  if (continuationInFlight.has(sessionID)) return
-  continuationInFlight.add(sessionID)
-
+async function processIdle(scheduler, host, stateDir, sessionID, options) {
+  return scheduler.runExclusive(sessionID, async () => {
   let shouldRecheck = false
   let leaseOwner = null
   let leaseMissionID = null
-  let leaseHeartbeat = null
+  let expectedMissionID = null
+  let accountingPhase = "pre"
   let recheckDelay = Math.max(50, Number(options?.min_continue_interval_ms ?? 250))
 
   try {
     let mission = await readMission(stateDir, sessionID)
     if (!mission) return
-    const expectedMissionID = mission.missionID
+    expectedMissionID = mission.missionID
     mission = await refreshMissionEvidence(stateDir, sessionID, await getWorktreeFingerprint(options.worktree), expectedMissionID) || mission
     leaseOwner = newSchedulerOwnerID()
     const lease = await acquireSchedulerLease(stateDir, sessionID, leaseOwner, {
@@ -533,34 +457,37 @@ async function processIdle(client, stateDir, sessionID, options) {
       return
     }
     leaseMissionID = expectedMissionID
-    leaseHeartbeat = setInterval(() => {
+    scheduler.startHeartbeat(sessionID, Math.max(250, Math.floor(options.scheduler_lease_ms / 3)), () => {
       void renewSchedulerLease(stateDir, sessionID, leaseOwner, {
         expectedMissionID,
         leaseMs: options.scheduler_lease_ms,
       }).catch(() => {})
-    }, Math.max(250, Math.floor(options.scheduler_lease_ms / 3)))
+    })
 
-    const rootMessages = await listMessages(client, sessionID)
+    const rootMessages = await listMessages(host, sessionID)
     mission = (await recordRootTurnOutcomes(stateDir, sessionID, mission, rootMessages, options)) || mission
     if (mission.missionID !== expectedMissionID) return
 
-    mission = (await accountLiveMission(client, stateDir, sessionID, expectedMissionID, options)) || mission
+    mission = (await accountLiveMission(host, stateDir, sessionID, expectedMissionID, options)) || mission
     if (mission.missionID !== expectedMissionID) return
+    scheduler.resetRetries(sessionID, "pre")
 
     if (mission.status === "budget_limited") {
       if (!mission.budgetWrapupSent) {
-        const marked = await markBudgetWrapupSent(stateDir, sessionID, expectedMissionID)
-        if (marked) {
-          const response = normalizePromptResponse(await sendPrompt(client, sessionID, budgetLimitPrompt(marked)))
-          if (response) {
-            await accountLiveMission(client, stateDir, sessionID, expectedMissionID, options)
-            await recordMissionTurnOutcome(stateDir, sessionID, response, {
-              expectedMissionID,
-              automatic: false,
-              failedExecThreshold: Math.max(1, Number(options?.failed_exec_threshold ?? 3)),
-              emptyAutomaticThreshold: Math.max(1, Number(options?.empty_auto_threshold ?? 3)),
-            })
-          }
+        accountingPhase = "prompt"
+        const response = normalizePromptResponse(await sendPrompt(host, sessionID, budgetLimitPrompt(mission)))
+        if (response) {
+          scheduler.resetRetries(sessionID, "prompt")
+          accountingPhase = "post"
+          const marked = await markBudgetWrapupSent(stateDir, sessionID, expectedMissionID)
+          if (!marked) return
+          await accountLiveMission(host, stateDir, sessionID, expectedMissionID, options)
+          await recordMissionTurnOutcome(stateDir, sessionID, response, {
+            expectedMissionID,
+            automatic: false,
+            failedExecThreshold: Math.max(1, Number(options?.failed_exec_threshold ?? 3)),
+            emptyAutomaticThreshold: Math.max(1, Number(options?.empty_auto_threshold ?? 3)),
+          })
         }
       }
       return
@@ -591,10 +518,14 @@ async function processIdle(client, stateDir, sessionID, options) {
 
     // session.prompt is awaited, so this is one physical OpenCode turn, mirroring
     // Codex start_turn_if_idle rather than asking the same turn to recurse.
-    const response = normalizePromptResponse(await sendPrompt(client, sessionID, continuationPrompt(mission)))
+    accountingPhase = "prompt"
+    const response = normalizePromptResponse(await sendPrompt(host, sessionID, continuationPrompt(mission)))
     if (response) {
-      mission = (await accountLiveMission(client, stateDir, sessionID, expectedMissionID, options)) || mission
+      scheduler.resetRetries(sessionID, "prompt")
+      accountingPhase = "post"
+      mission = (await accountLiveMission(host, stateDir, sessionID, expectedMissionID, options)) || mission
       if (mission.missionID !== expectedMissionID) return
+      scheduler.resetRetries(sessionID, "post")
       mission = (await recordMissionTurnOutcome(stateDir, sessionID, response, {
         expectedMissionID,
         automatic: true,
@@ -606,18 +537,47 @@ async function processIdle(client, stateDir, sessionID, options) {
 
     shouldRecheck = mission?.missionID === expectedMissionID && mission?.status === "active"
   } catch (error) {
-    await log(client, "error", "Mission idle continuation failed", {
+    if (expectedMissionID && isTransientAccountingError(error)) {
+      const retry = scheduler.nextRetry(sessionID, options.accounting_retry, accountingPhase)
+      if (retry.retry) {
+        shouldRecheck = true
+        recheckDelay = retry.delayMs
+      } else {
+        await setStoppedStatus(
+          stateDir,
+          sessionID,
+          "paused",
+          `Continuation host API unavailable after ${retry.attempt} attempts: ${error.message}`.slice(0, 500),
+          expectedMissionID,
+        ).catch(() => {})
+      }
+    } else if (expectedMissionID && error?.code === "ACCOUNTING_TRAVERSAL_INCOMPLETE") {
+      scheduler.resetRetries(sessionID)
+      await setStoppedStatus(
+        stateDir,
+        sessionID,
+        "paused",
+        `Accounting incomplete: ${error.message}`.slice(0, 500),
+        expectedMissionID,
+      ).catch(() => {})
+    }
+    await log(host.client, "error", "Mission idle continuation failed", {
       sessionID,
+      code: error?.code || null,
       error: String(error?.stack || error),
     })
   } finally {
-    if (leaseHeartbeat) clearInterval(leaseHeartbeat)
+    scheduler.stopHeartbeat(sessionID)
     if (leaseOwner && leaseMissionID) {
       await releaseSchedulerLease(stateDir, sessionID, leaseOwner, leaseMissionID).catch(() => {})
     }
-    continuationInFlight.delete(sessionID)
-    if (shouldRecheck) scheduleRecheck(client, stateDir, sessionID, options, recheckDelay)
+    if (shouldRecheck) {
+      scheduler.scheduleRecheck(sessionID, recheckDelay, () => {
+        void processIdle(scheduler, host, stateDir, sessionID, options)
+      })
+    }
   }
+  })
 }
 
 function completionResponse(mission) {
@@ -633,6 +593,9 @@ function completionResponse(mission) {
 
 export const MissionPlugin = async ({ client, $, directory }, rawOptions = {}) => {
   const options = normalizePluginOptions(rawOptions)
+  const adapter = createOpenCodeAdapter(client)
+  const host = { adapter, client }
+  const scheduler = new SchedulerState()
   const stateDir = options.state_dir ? String(options.state_dir) : defaultStateDir()
   const commandName = String(options.command_name || DEFAULT_COMMAND)
   const aliasName = options.alias === false ? null : String(options.alias || DEFAULT_ALIAS)
@@ -670,7 +633,7 @@ export const MissionPlugin = async ({ client, $, directory }, rawOptions = {}) =
         async execute(_args, context) {
           let mission = await readMission(stateDir, context.sessionID)
           if (!mission) return JSON.stringify({ mission: null, remainingTokens: null }, null, 2)
-          mission = (await accountLiveMission(client, stateDir, context.sessionID, mission.missionID, options)) || mission
+          mission = (await accountLiveMission(host, stateDir, context.sessionID, mission.missionID, options)) || mission
           return publicMissionJSON(mission)
         },
       }),
@@ -696,20 +659,17 @@ export const MissionPlugin = async ({ client, $, directory }, rawOptions = {}) =
           })).optional().describe("Optional acceptance requirements that must have evidence before completion."),
         },
         async execute(args, context) {
-          let mission = await createMission(
+          const baselineSamples = await collectSessionUsage(host.adapter || host, context.sessionID, {
+            maxDepth: Math.max(0, Number(options?.descendant_max_depth ?? 6)),
+            maxSessions: Math.max(1, Number(options?.descendant_max_sessions ?? 96)),
+          })
+          const mission = await createMission(
             stateDir,
             context.sessionID,
             args.objective,
             args.token_budget ?? null,
-            { maxTokenBudget: maxBudget, defaultTokenBudget: maxBudget, requirements: args.requirements, verification: options.verification },
+            { maxTokenBudget: maxBudget, defaultTokenBudget: maxBudget, requirements: args.requirements, verification: options.verification, baselineSamples },
           )
-          const baselineSamples = await collectUsageSamples(client, context.sessionID, {
-            maxDepth: Math.max(0, Number(options?.descendant_max_depth ?? 6)),
-            maxSessions: Math.max(1, Number(options?.descendant_max_sessions ?? 96)),
-          })
-          mission = (await seedMissionUsageBaselines(stateDir, context.sessionID, baselineSamples, {
-            expectedMissionID: mission.missionID,
-          })) || mission
           return publicMissionJSON(mission)
         },
       }),
@@ -727,7 +687,7 @@ export const MissionPlugin = async ({ client, $, directory }, rawOptions = {}) =
           mission = await refreshMissionEvidence(stateDir, context.sessionID, await getWorktreeFingerprint(context.worktree), expectedMissionID) || mission
 
           // Mirror Codex: account the live turn before applying a stopped/completed status.
-          mission = (await accountLiveMission(client, stateDir, context.sessionID, expectedMissionID, options)) || mission
+          mission = (await accountLiveMission(host, stateDir, context.sessionID, expectedMissionID, options)) || mission
           if (mission.missionID !== expectedMissionID) throw new Error("Mission changed concurrently; status update rejected.")
 
           const reason =
@@ -804,6 +764,8 @@ export const MissionPlugin = async ({ client, $, directory }, rawOptions = {}) =
       } catch (error) {
         await log(client, "warn", "Mission tool-boundary accounting failed", {
           sessionID: input.sessionID,
+          code: error?.code || "MISSION_ACCOUNTING_FAILED",
+          phase: "tool.execute.after",
           error: String(error?.message || error),
         })
       }
@@ -812,7 +774,7 @@ export const MissionPlugin = async ({ client, $, directory }, rawOptions = {}) =
     "command.execute.before": async (input, output) => {
       if (input.command !== commandName && input.command !== aliasName) return
       try {
-        const prompt = await handleSlashCommand(client, $, directory, stateDir, input.sessionID, input.arguments, options)
+      const prompt = await handleSlashCommand(host, $, directory, stateDir, input.sessionID, input.arguments, options)
         // OpenCode keeps the original parts array; mutate it in place.
         output.parts.splice(0, output.parts.length, { type: "text", text: prompt, synthetic: true })
       } catch (error) {
@@ -843,11 +805,20 @@ export const MissionPlugin = async ({ client, $, directory }, rawOptions = {}) =
     },
 
     event: async ({ event }) => {
+      if (event.type === "server.instance.disposed") {
+        scheduler.dispose()
+        return
+      }
       const sessionID = getEventSessionID(event)
       if (!sessionID) return
 
+      if (event.type === "session.deleted") {
+        scheduler.disposeSession(sessionID)
+        return
+      }
+
       if (event.type === "session.idle" && autoContinue) {
-        void processIdle(client, stateDir, sessionID, options)
+        void processIdle(scheduler, host, stateDir, sessionID, options)
         return
       }
 

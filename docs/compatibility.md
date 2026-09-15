@@ -8,6 +8,7 @@
 | Package format | Native ESM (`"type": "module"`) | `node --check` |
 | `@opencode-ai/plugin` | `>=1.18.30 <2.0.0` | `package.json`, CI dependency |
 | OpenCode plugin loading | Local plugin or npm plugin configuration | OpenCode plugin docs |
+| Persisted Mission schema | Versions `2` and `3` | Core migration/quarantine tests |
 
 The package keeps `@opencode-ai/plugin` optional at runtime so a local self-contained plugin can
 be copied into OpenCode. It is a development dependency for the repository's smoke tests.
@@ -32,6 +33,12 @@ npm run check
 - User plugin installation uses OpenCode's plugin directory and is distinct from state storage.
 - OpenCode exposes session events and parent/child relationships, but not every native Codex Goal
   hook. Mid-turn native steering and native metrics are therefore not equivalent.
+- The Mission adapter accepts only the SDK's array response shape for session messages and child
+  sessions. A successful response with `null`, an object, or another malformed payload is treated
+  as a typed host API failure rather than as an empty list.
+- Automatic continuation accepts only the SDK prompt response shape containing assistant `info` and
+  a `parts` array. Malformed prompt responses are typed failures and follow the configured bounded
+  continuation retry policy.
 
 ## Upgrade policy
 

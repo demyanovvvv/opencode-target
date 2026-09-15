@@ -95,6 +95,110 @@ test("Mission lifecycle: create, pause, resume, complete, then replace with a fr
   })
 })
 
+test("unknown persisted status is quarantined instead of becoming active", async () => {
+  await withState(async (dir) => {
+    const file = missionPath(dir, "corrupt-status")
+    await mkdir(path.dirname(file), { recursive: true })
+    await writeFile(file, JSON.stringify({
+      version: 3,
+      sessionID: "corrupt-status",
+      missionID: "mission-corrupt-status",
+      objective: "Do not revive invalid state",
+      status: "future_status",
+    }))
+
+    await assert.rejects(
+      () => readMission(dir, "corrupt-status"),
+      (error) => error?.code === "MISSION_STATE_CORRUPT",
+    )
+    assert.equal(await readMission(dir, "corrupt-status"), null)
+  })
+})
+
+test("persisted Mission identity fields are required and quarantined", async () => {
+  await withState(async (dir) => {
+    const file = missionPath(dir, "invalid-identity")
+    await mkdir(path.dirname(file), { recursive: true })
+    await writeFile(file, JSON.stringify({
+      version: 3,
+      sessionID: "invalid-identity",
+      objective: "Do not synthesize identity",
+      status: "paused",
+    }))
+
+    await assert.rejects(
+      () => readMission(dir, "invalid-identity"),
+      (error) => error?.code === "MISSION_STATE_CORRUPT",
+    )
+    assert.equal(await readMission(dir, "invalid-identity"), null)
+  })
+})
+
+test("persisted Mission session identity must match its session file", async () => {
+  await withState(async (dir) => {
+    const file = missionPath(dir, "requested-session")
+    await mkdir(path.dirname(file), { recursive: true })
+    await writeFile(file, JSON.stringify({
+      version: 3,
+      sessionID: "different-session",
+      missionID: "mission-mismatch",
+      objective: "Do not cross session boundaries",
+      status: "paused",
+    }))
+
+    await assert.rejects(
+      () => readMission(dir, "requested-session"),
+      (error) => error?.code === "MISSION_STATE_CORRUPT",
+    )
+    assert.equal(await readMission(dir, "requested-session"), null)
+  })
+})
+
+test("persisted schema accepts version 2 but quarantines unknown versions", async () => {
+  await withState(async (dir) => {
+    const legacyFile = missionPath(dir, "legacy-v2")
+    await mkdir(path.dirname(legacyFile), { recursive: true })
+    await writeFile(legacyFile, JSON.stringify({
+      version: 2,
+      sessionID: "legacy-v2",
+      missionID: "mission-legacy-v2",
+      objective: "Load supported legacy state",
+      status: "paused",
+      tokenBudget: 500,
+      tokensUsed: 12,
+      rootTokensUsed: 12,
+      descendantTokensUsed: 0,
+      timeUsedSeconds: 4,
+      createdAtMs: 100,
+      updatedAtMs: 200,
+      accumulatedActiveMs: 4_000,
+      continuationCount: 2,
+      budgetWrapupSent: false,
+      usageByMessage: { "legacy-message": 12 },
+      runtime: { noProgressStreak: 1 },
+    }))
+    const legacy = await readMission(dir, "legacy-v2")
+    assert.equal(legacy.version, 3)
+    assert.equal(legacy.tokenBudget, 500)
+    assert.equal(legacy.tokensUsed, 12)
+    assert.equal(legacy.continuationCount, 2)
+    assert.equal(legacy.usageByMessage["legacy-message"], 12)
+
+    const futureFile = missionPath(dir, "future-v4")
+    await writeFile(futureFile, JSON.stringify({
+      version: 4,
+      sessionID: "future-v4",
+      missionID: "mission-future-v4",
+      objective: "Do not guess future schema semantics",
+      status: "paused",
+    }))
+    await assert.rejects(
+      () => readMission(dir, "future-v4"),
+      (error) => error?.code === "MISSION_STATE_CORRUPT",
+    )
+  })
+})
+
 test("token accounting uses non-cached input + output, excludes plan mode, splits descendant usage, and is idempotent", async () => {
   await withState(async (dir) => {
     const m = await createMission(dir, "root", "Do work")
@@ -131,6 +235,65 @@ test("seeded token baseline excludes pre-Mission usage but charges later delta f
     const completed = assistant("mid", { input: 130, cached: 10, output: 30, created: started - 1000 })
     const updated = await accountMissionUsage(dir, "s", [{ sessionID: "s", message: completed }], { expectedMissionID: m.missionID })
     assert.equal(updated.tokensUsed, 50)
+  })
+})
+
+test("Mission creation persists its usage baseline atomically", async () => {
+  await withState(async (dir) => {
+    const partial = assistant("mid", { input: 90, cached: 10, output: 20, created: Date.now() - 1000 })
+    const mission = await createMission(dir, "atomic", "Start with baseline", null, {
+      baselineSamples: [{ sessionID: "atomic", message: partial }],
+    })
+
+    assert.equal(mission.tokensUsed, 0)
+    assert.equal(mission.accounting.trackedMessages, 1)
+    const completed = assistant("mid", { input: 130, cached: 10, output: 30, created: Date.now() - 1000 })
+    const updated = await accountMissionUsage(dir, "atomic", [
+      { sessionID: "atomic", message: completed },
+    ], { expectedMissionID: mission.missionID })
+    assert.equal(updated.tokensUsed, 50)
+  })
+})
+
+test("a pre-Mission turn missing from activation snapshot is baselined on first observation", async () => {
+  await withState(async (dir) => {
+    const mission = await createMission(dir, "late", "Track only post-activation delta")
+    const first = assistant("late-turn", {
+      input: 100,
+      created: mission.createdAtMs - 100,
+    })
+    first.info.time.completed = mission.createdAtMs + 100
+
+    let updated = await accountMissionUsage(dir, "late", [
+      { sessionID: "late", message: first },
+    ], { expectedMissionID: mission.missionID })
+    assert.equal(updated.tokensUsed, 0)
+    assert.equal(updated.usageByMessage["late:late-turn"], 100)
+
+    const later = assistant("late-turn", {
+      input: 130,
+      created: mission.createdAtMs - 100,
+    })
+    later.info.time.completed = mission.createdAtMs + 200
+    updated = await accountMissionUsage(dir, "late", [
+      { sessionID: "late", message: later },
+    ], { expectedMissionID: mission.missionID })
+    assert.equal(updated.tokensUsed, 30)
+  })
+})
+
+test("Mission creation rejects a baseline larger than the durable watermark capacity", async () => {
+  await withState(async (dir) => {
+    const baselineSamples = Array.from({ length: 12_001 }, (_, index) => ({
+      sessionID: "oversized",
+      message: assistant(`old-${index}`, { input: 1, created: Date.now() - 1000 }),
+    }))
+
+    await assert.rejects(
+      createMission(dir, "oversized", "Cannot safely truncate baseline", null, { baselineSamples }),
+      (error) => error.code === "MISSION_BASELINE_TOO_LARGE",
+    )
+    assert.equal(await readMission(dir, "oversized"), null)
   })
 })
 
@@ -386,6 +549,28 @@ test("scheduler lease has exclusive ownership and may be recovered after expiry"
   })
 })
 
+test("an expired scheduler lease cannot be revived by renewal", async () => {
+  await withState(async (dir) => {
+    const mission = await createMission(dir, "expired-renewal", "Fence expired owner")
+    const acquired = await acquireSchedulerLease(dir, "expired-renewal", "owner-a", {
+      expectedMissionID: mission.missionID,
+      leaseMs: 1_000,
+      at: 10_000,
+    })
+    assert.equal(acquired.acquired, true)
+    assert.equal(await renewSchedulerLease(dir, "expired-renewal", "owner-a", {
+      expectedMissionID: mission.missionID,
+      leaseMs: 1_000,
+      at: 11_001,
+    }), null)
+    assert.equal((await acquireSchedulerLease(dir, "expired-renewal", "owner-b", {
+      expectedMissionID: mission.missionID,
+      leaseMs: 1_000,
+      at: 11_001,
+    })).acquired, true)
+  })
+})
+
 test("scheduler lease cannot mutate a replacement or stopped Mission", async () => {
   await withState(async (dir) => {
     const old = await createMission(dir, "s", "Old")
@@ -539,6 +724,7 @@ test("Mission journal and report explain lifecycle and missing requirements", as
     assert.ok(report.historyLength >= 1)
     assert.deepEqual(report.verificationSummary, { total: 0, passed: 0, failed: 0, attempts: 0 })
     assert.deepEqual(report.unresolvedRisks, ["Missing evidence: tests"])
+    assert.equal(report.accounting.truncated, false)
   })
 })
 

@@ -20,7 +20,7 @@ npm run check
 Confirm that:
 
 - source and generated plugin pass syntax checks;
-- unit and both smoke suites pass;
+- unit tests and all smoke suites pass, including budget-wrap-up and restart recovery coverage;
 - `dist/mission.js` contains the current source behavior;
 - no state files, lock files, credentials, or local configuration are packaged.
 

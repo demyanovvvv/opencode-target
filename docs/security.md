@@ -21,7 +21,16 @@ local application data:
 The implementation uses per-session lock files with an owner token, heartbeat timestamps, and
 temporary-file plus rename writes. These reduce partial-write and concurrent-mutation risks but do
 not provide encryption or multi-host locking. A corrupt state file is quarantined rather than
-silently discarded.
+silently discarded. In particular, an unknown persisted lifecycle status is treated as corruption;
+it cannot be revived as an active Mission during plugin restart.
+Persisted session and Mission identities are required, and the session identity must match the
+state file being read so a state document cannot cross session boundaries.
+
+Stale-lock recovery confirms that the lock modification time did not advance before removal. A
+heartbeat observed during stale inspection prevents that recovery attempt from deleting the lock.
+The lock payload must also remain byte-identical across the confirmation reads, covering filesystems
+with coarse modification-time precision. Lock release requires an exact owner-token match; substring
+matches are not sufficient.
 
 ## Plugin permissions
 
@@ -40,8 +49,12 @@ or roll back files, so users retain control over repository recovery.
 
 - An active Mission can create repeated physical turns until it reaches a stop condition.
 - Token budgets and circuit breakers are safety controls, not security isolation.
-- Descendant session traversal has configurable depth and session caps, but it trusts the host's
-  parent/child session data.
+- Descendant session traversal has configurable depth and session caps and fails closed when either
+  cap would omit linked descendants, but it still trusts the host's parent/child session data.
+- Malformed successful messages/children API payloads fail closed; they are never normalized to empty
+  lists that could silently undercount usage.
+- Malformed prompt success payloads fail closed; they cannot be interpreted as an empty continuation
+  and silently trigger another automatic turn.
 - A compromised or modified plugin file executes with the same privileges as OpenCode.
 
 Keep the plugin source and generated artifact reviewable, run `npm run check` before distribution,

@@ -1,11 +1,397 @@
 // OpenCode Mission — self-contained local plugin
-// Generated from src/core.js + src/server.js. Do not edit dist directly.
+// Generated from src/store.js + src/ledger.js + src/adapter.js + src/scheduler.js + src/traversal.js + src/core.js + src/server.js. Do not edit dist directly.
+import { tool } from "@opencode-ai/plugin"
 import { randomUUID } from "node:crypto"
-import { mkdir, open, readFile, rename, rm, stat, unlink, writeFile } from "node:fs/promises"
+import { execFile } from "node:child_process"
+import { mkdir, open, readFile, readdir, rename, rm, stat, unlink, writeFile } from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
+import { promisify } from "node:util"
+const LOCK_STALE_MS = 15_000
+const LOCK_HEARTBEAT_MS = 5_000
+const LOCK_RETRY_MS = 25
+const LOCK_RETRIES = Math.ceil(LOCK_STALE_MS / LOCK_RETRY_MS) + 2
+
+function safeName(sessionID) { return Buffer.from(String(sessionID)).toString("base64url") }
+
+class MissionStore {
+  constructor(stateDir, options = {}) {
+    this.stateDir = path.resolve(String(stateDir))
+    this.lockStaleMs = options.lockStaleMs ?? LOCK_STALE_MS
+    this.lockHeartbeatMs = options.lockHeartbeatMs ?? LOCK_HEARTBEAT_MS
+    this.lockRetries = options.lockRetries ?? LOCK_RETRIES
+    this.lockRetryMs = options.lockRetryMs ?? LOCK_RETRY_MS
+    this.now = options.now ?? Date.now
+    this.stat = options.stat ?? stat
+    this.unlink = options.unlink ?? unlink
+    this.readLockFile = options.readLockFile ?? readFile
+  }
+  path(sessionID) { return path.join(this.stateDir, "missions", `${safeName(sessionID)}.json`) }
+  lockPath(sessionID) { return path.join(this.stateDir, "locks", `${safeName(sessionID)}.lock`) }
+  async ensureDirs() {
+    await Promise.all([
+      mkdir(path.join(this.stateDir, "missions"), { recursive: true }),
+      mkdir(path.join(this.stateDir, "locks"), { recursive: true }),
+      mkdir(path.join(this.stateDir, "corrupt"), { recursive: true }),
+    ])
+  }
+  async read(sessionID) {
+    const file = this.path(sessionID)
+    let raw
+    try { raw = await readFile(file, "utf8") } catch (error) {
+      if (error?.code === "ENOENT") return null
+      throw error
+    }
+    try { return JSON.parse(raw) } catch (error) {
+      await mkdir(path.join(this.stateDir, "corrupt"), { recursive: true })
+      const target = path.join(this.stateDir, "corrupt", `${path.basename(file)}.${Date.now()}.${randomUUID()}.corrupt`)
+      await rename(file, target)
+      const diagnostic = new Error(`Mission state is corrupt and was quarantined: ${target}`)
+      diagnostic.code = "MISSION_STATE_CORRUPT"
+      diagnostic.cause = error
+      throw diagnostic
+    }
+  }
+  async quarantine(sessionID) {
+    const file = this.path(sessionID)
+    await mkdir(path.join(this.stateDir, "corrupt"), { recursive: true })
+    const target = path.join(this.stateDir, "corrupt", `${path.basename(file)}.${Date.now()}.${randomUUID()}.corrupt`)
+    await rename(file, target)
+    return target
+  }
+  async write(sessionID, value) {
+    await this.ensureDirs()
+    const file = this.path(sessionID)
+    const temp = `${file}.${process.pid}.${randomUUID()}.tmp`
+    await writeFile(temp, JSON.stringify(value, null, 2) + "\n", { encoding: "utf8", mode: 0o600 })
+    await rename(temp, file)
+    return value
+  }
+  async remove(sessionID) { await this.withLock(sessionID, () => rm(this.path(sessionID), { force: true })) }
+  async listCorrupt() { await this.ensureDirs(); return (await readdir(path.join(this.stateDir, "corrupt"))).sort() }
+  async mutate(sessionID, fn) {
+    return this.withLock(sessionID, async () => {
+      const current = await this.read(sessionID)
+      return this.write(sessionID, await fn(current))
+    })
+  }
+  async withLock(sessionID, fn) {
+    await this.ensureDirs()
+    const file = this.lockPath(sessionID)
+    for (let attempt = 0; attempt < this.lockRetries; attempt += 1) {
+      let handle
+      try {
+        handle = await open(file, "wx", 0o600)
+        const owner = `${process.pid}:${randomUUID()}`
+        await handle.writeFile(JSON.stringify({ owner, pid: process.pid, createdAtMs: Date.now() }))
+        const heartbeat = setInterval(() => { void handle.utimes(new Date(), new Date()).catch(() => {}) }, this.lockHeartbeatMs)
+        try { return await fn() } finally {
+          clearInterval(heartbeat)
+          await handle.close().catch(() => {})
+          let currentOwner = null
+          try { currentOwner = JSON.parse(await this.readLockFile(file, "utf8")).owner } catch {}
+          if (currentOwner === owner) await unlink(file).catch(() => {})
+        }
+      } catch (error) {
+        if (error?.code !== "EEXIST") throw error
+        try {
+          const observed = await this.stat(file)
+          if (this.now() - observed.mtimeMs > this.lockStaleMs) {
+            const confirmed = await this.stat(file)
+            const observedContents = await this.readLockFile(file, "utf8")
+            const confirmedContents = await this.readLockFile(file, "utf8")
+            if (
+              confirmed.mtimeMs === observed.mtimeMs &&
+              observedContents === confirmedContents &&
+              this.now() - confirmed.mtimeMs > this.lockStaleMs
+            ) {
+              await this.unlink(file).catch(() => {})
+            }
+          }
+        } catch {}
+        await new Promise((resolve) => setTimeout(resolve, this.lockRetryMs))
+      }
+    }
+    throw new Error(`Timed out acquiring Mission state lock for session ${sessionID}`)
+  }
+}
+
+function isPlanMode(info) {
+  const mode = String(info?.mode || "").toLowerCase()
+  const agent = String(info?.agent || "").toLowerCase()
+  return mode === "plan" || agent === "plan"
+}
+
+function extractLedgerUsage(message, { excludePlanMode = true } = {}) {
+  const info = message?.info ?? message
+  if (!info || info.role !== "assistant") return null
+  const base = {
+    id: String(info.id || info.messageID || ""),
+    createdAtMs: Number(info.time?.created) || 0,
+    completedAtMs: Number(info.time?.completed) || 0,
+  }
+  if (excludePlanMode && isPlanMode(info)) return { ...base, tokens: 0, excluded: "plan_mode" }
+  const tokens = info.tokens || {}
+  const input = Math.max(0, Number(tokens.input) || 0)
+  const cachedInput = Math.max(0, Number(tokens.cache?.read) || 0)
+  const output = Math.max(0, Number(tokens.output) || 0)
+  return { ...base, tokens: Math.max(0, input - cachedInput) + output, excluded: null }
+}
+
+class UsageLedger {
+  constructor({ createdAtMs = 0, maxEntries = 12_000, rootSessionID = "root", usageByMessage = {} } = {}) {
+    this.createdAtMs = Number(createdAtMs) || 0
+    this.maxEntries = Math.max(1, Number(maxEntries) || 12_000)
+    this.rootSessionID = String(rootSessionID)
+    this.usageByMessage = new Map(Object.entries(usageByMessage))
+    this.truncated = false
+  }
+  record(samples = [], { excludePlanMode = true } = {}) {
+    let rootDelta = 0
+    let descendantDelta = 0
+    for (const sample of samples) {
+      const sessionID = String(sample?.sessionID || this.rootSessionID)
+      const usage = extractLedgerUsage(sample?.message ?? sample, { excludePlanMode })
+      if (!usage?.id) continue
+      const key = `${sessionID}:${usage.id}`
+      if (usage.createdAtMs && usage.createdAtMs < this.createdAtMs && !this.usageByMessage.has(key)) {
+        this.usageByMessage.set(key, usage.tokens)
+        continue
+      }
+      const previous = this.usageByMessage.get(key) || 0
+      if (usage.tokens > previous) {
+        const delta = usage.tokens - previous
+        this.usageByMessage.set(key, usage.tokens)
+        if (sessionID === this.rootSessionID) rootDelta += delta
+        else descendantDelta += delta
+      }
+    }
+    if (this.usageByMessage.size > this.maxEntries) {
+      const entries = [...this.usageByMessage.entries()].slice(-this.maxEntries)
+      this.usageByMessage = new Map(entries)
+      this.truncated = true
+    }
+    return { rootDelta, descendantDelta, totalDelta: rootDelta + descendantDelta }
+  }
+  completeness() {
+    return { trackedMessages: this.usageByMessage.size, maxEntries: this.maxEntries, truncated: this.truncated }
+  }
+}
+
+const execFileAsync = promisify(execFile)
+
+function unwrapData(value) {
+  return value?.data ?? value
+}
+
+function requireArray(value, endpoint, sessionID) {
+  if (Array.isArray(value)) return value
+  const actual = value === null ? "null" : Array.isArray(value) ? "array" : typeof value
+  const error = new Error(`OpenCode ${endpoint} API returned ${actual} for session ${sessionID}; expected an array.`)
+  error.code = endpoint === "messages" ? "OPENCODE_MESSAGES_FAILED" : "OPENCODE_CHILDREN_FAILED"
+  throw error
+}
+
+function requirePrompt(value, sessionID) {
+  if (value && typeof value === "object" && value.info && Array.isArray(value.parts)) return value
+  const error = new Error(`OpenCode prompt API returned an invalid response for session ${sessionID}; expected an assistant message.`)
+  error.code = "OPENCODE_PROMPT_FAILED"
+  throw error
+}
+
+function createGitAdapter({ exec = execFileAsync } = {}) {
+  return {
+    async fingerprint(cwd = process.cwd()) {
+      const { stdout: head } = await exec("git", ["rev-parse", "HEAD"], { cwd })
+      const { stdout: status } = await exec("git", ["status", "--porcelain=v1"], { cwd })
+      return `${String(head).trim()}|${String(status)}`.slice(0, 4000)
+    },
+  }
+}
+
+function createOpenCodeAdapter(client) {
+  return {
+    async messages(sessionID) {
+      try {
+        const data = unwrapData(await client.session.messages({ path: { id: sessionID } }))
+        return requireArray(data, "messages", sessionID)
+      } catch (error) {
+        if (error?.code === "OPENCODE_MESSAGES_FAILED") throw error
+        const failure = new Error(`OpenCode messages API failed for session ${sessionID}: ${error?.message || String(error)}`)
+        failure.code = "OPENCODE_MESSAGES_FAILED"
+        failure.cause = error
+        throw failure
+      }
+    },
+    async children(sessionID) {
+      try {
+        const data = unwrapData(await client.session.children({ path: { id: sessionID } }))
+        return requireArray(data, "children", sessionID)
+      } catch (error) {
+        if (error?.code === "OPENCODE_CHILDREN_FAILED") throw error
+        const failure = new Error(`OpenCode children API failed for session ${sessionID}: ${error?.message || String(error)}`)
+        failure.code = "OPENCODE_CHILDREN_FAILED"
+        failure.cause = error
+        throw failure
+      }
+    },
+    async prompt(sessionID, text) {
+      try {
+        const response = await client.session.prompt({
+          path: { id: sessionID },
+          body: { parts: [{ type: "text", text, synthetic: true }] },
+        })
+        return requirePrompt(unwrapData(response), sessionID)
+      } catch (error) {
+        if (error?.code === "OPENCODE_PROMPT_FAILED") throw error
+        const failure = new Error(`OpenCode prompt API failed for session ${sessionID}: ${error?.message || String(error)}`)
+        failure.code = "OPENCODE_PROMPT_FAILED"
+        failure.cause = error
+        throw failure
+      }
+    },
+  }
+}
+
+class SchedulerState {
+  constructor(timers = globalThis) {
+    this.timers = timers
+    this.inFlight = new Set()
+    this.rechecks = new Map()
+    this.heartbeats = new Map()
+    this.retries = new Map()
+    this.disposed = false
+  }
+
+  async runExclusive(sessionID, operation) {
+    if (this.disposed || this.inFlight.has(sessionID)) {
+      return { started: false, value: undefined }
+    }
+    this.inFlight.add(sessionID)
+    try {
+      return { started: true, value: await operation() }
+    } finally {
+      this.inFlight.delete(sessionID)
+    }
+  }
+
+  scheduleRecheck(sessionID, delayMs, operation) {
+    if (this.disposed) return false
+    this.clearRecheck(sessionID)
+    const timer = this.timers.setTimeout(() => {
+      if (this.rechecks.get(sessionID) === timer) this.rechecks.delete(sessionID)
+      operation()
+    }, Math.max(0, delayMs))
+    this.rechecks.set(sessionID, timer)
+    return true
+  }
+
+  hasScheduledRecheck(sessionID) {
+    return this.rechecks.has(sessionID)
+  }
+
+  clearRecheck(sessionID) {
+    const timer = this.rechecks.get(sessionID)
+    if (timer !== undefined) this.timers.clearTimeout(timer)
+    this.rechecks.delete(sessionID)
+  }
+
+  startHeartbeat(sessionID, intervalMs, operation) {
+    if (this.disposed) return false
+    this.stopHeartbeat(sessionID)
+    const timer = this.timers.setInterval(operation, intervalMs)
+    this.heartbeats.set(sessionID, timer)
+    return true
+  }
+
+  stopHeartbeat(sessionID) {
+    const timer = this.heartbeats.get(sessionID)
+    if (timer !== undefined) this.timers.clearInterval(timer)
+    this.heartbeats.delete(sessionID)
+  }
+
+  nextRetry(sessionID, { maxAttempts = 1, baseDelayMs = 250, maxDelayMs = 5000 } = {}, scope = "default") {
+    if (this.disposed) return { attempt: 0, retry: false, delayMs: 0 }
+    const sessionRetries = this.retries.get(sessionID) || new Map()
+    const attempt = (sessionRetries.get(scope) || 0) + 1
+    sessionRetries.set(scope, attempt)
+    this.retries.set(sessionID, sessionRetries)
+    const retry = attempt < maxAttempts
+    const delayMs = retry ? Math.min(maxDelayMs, baseDelayMs * (2 ** (attempt - 1))) : 0
+    return { attempt, retry, delayMs }
+  }
+
+  resetRetries(sessionID, scope = null) {
+    if (scope == null) {
+      this.retries.delete(sessionID)
+      return
+    }
+    const sessionRetries = this.retries.get(sessionID)
+    if (!sessionRetries) return
+    sessionRetries.delete(scope)
+    if (sessionRetries.size === 0) this.retries.delete(sessionID)
+  }
+
+  disposeSession(sessionID) {
+    this.clearRecheck(sessionID)
+    this.stopHeartbeat(sessionID)
+    this.resetRetries(sessionID)
+  }
+
+  dispose() {
+    if (this.disposed) return
+    this.disposed = true
+    for (const sessionID of [...this.rechecks.keys()]) this.clearRecheck(sessionID)
+    for (const sessionID of [...this.heartbeats.keys()]) this.stopHeartbeat(sessionID)
+    this.retries.clear()
+  }
+}
+
+function sessionID(value) {
+  const id = value?.id || value?.sessionID || value?.sessionId
+  return id ? String(id) : null
+}
+
+function incompleteTraversal(reason, limit, id) {
+  const error = new Error(`Usage accounting traversal exceeded ${reason} limit ${limit} at session ${id}.`)
+  error.code = "ACCOUNTING_TRAVERSAL_INCOMPLETE"
+  error.reason = reason
+  error.limit = limit
+  error.sessionID = id
+  return error
+}
+
+async function collectSessionUsage(adapter, rootSessionID, { maxDepth = 6, maxSessions = 96 } = {}) {
+  const depthLimit = Math.max(0, Number(maxDepth) || 0)
+  const sessionLimit = Math.max(1, Number(maxSessions) || 1)
+  const samples = []
+  const queue = [{ id: rootSessionID, depth: 0 }]
+  const seen = new Set()
+
+  while (queue.length > 0) {
+    const current = queue.shift()
+    if (!current?.id || seen.has(current.id)) continue
+    if (seen.size >= sessionLimit) throw incompleteTraversal("max_sessions", sessionLimit, current.id)
+    seen.add(current.id)
+
+    const messages = await adapter.messages(current.id)
+    for (const message of messages) {
+      samples.push({ sessionID: current.id, message, descendant: current.id !== rootSessionID })
+    }
+
+    const children = await adapter.children(current.id)
+    const unseenChildren = children.map(sessionID).filter((id) => id && !seen.has(id))
+    if (current.depth >= depthLimit && unseenChildren.length > 0) {
+      throw incompleteTraversal("max_depth", depthLimit, current.id)
+    }
+    for (const id of unseenChildren) queue.push({ id, depth: current.depth + 1 })
+  }
+
+  return samples
+}
 
 const SCHEMA_VERSION = 3
+const SUPPORTED_SCHEMA_VERSIONS = new Set([2, SCHEMA_VERSION])
 const MAX_OBJECTIVE_CHARS = 4000
 const MISSION_STATUSES = Object.freeze([
   "active",
@@ -18,10 +404,6 @@ const MISSION_STATUSES = Object.freeze([
 const STOPPED_STATUSES = new Set(["paused", "blocked", "usage_limited", "budget_limited", "complete"])
 const TERMINAL_STATUSES = new Set(["budget_limited", "complete"])
 
-const LOCK_STALE_MS = 15_000
-const LOCK_HEARTBEAT_MS = 5_000
-const LOCK_RETRIES = 120
-const LOCK_RETRY_MS = 25
 const ACCOUNTING_ENTRY_LIMIT = 12_000
 const JOURNAL_ENTRY_LIMIT = 200
 const CHECKPOINT_ENTRY_LIMIT = 50
@@ -114,52 +496,8 @@ function missionPath(stateDir, sessionID) {
   return path.join(stateDir, "missions", `${safeSessionName(sessionID)}.json`)
 }
 
-function lockPath(stateDir, sessionID) {
-  return path.join(stateDir, "locks", `${safeSessionName(sessionID)}.lock`)
-}
-
-async function ensureDirs(stateDir) {
-  await Promise.all([
-    mkdir(path.join(stateDir, "missions"), { recursive: true }),
-    mkdir(path.join(stateDir, "locks"), { recursive: true }),
-  ])
-}
-
 async function withSessionLock(stateDir, sessionID, fn) {
-  await ensureDirs(stateDir)
-  const file = lockPath(stateDir, sessionID)
-  for (let i = 0; i < LOCK_RETRIES; i++) {
-    let handle
-    try {
-      handle = await open(file, "wx", 0o600)
-      const owner = `${process.pid}:${randomUUID()}`
-      await handle.writeFile(JSON.stringify({ owner, pid: process.pid, createdAtMs: Date.now() }))
-      const heartbeat = setInterval(() => {
-        void handle.utimes(new Date(), new Date()).catch(() => {})
-      }, LOCK_HEARTBEAT_MS)
-      try {
-        return await fn()
-      } finally {
-        clearInterval(heartbeat)
-        await handle.close().catch(() => {})
-        const current = await readFile(file, "utf8").catch(() => "")
-        if (current.includes(owner)) await unlink(file).catch(() => {})
-      }
-    } catch (error) {
-      if (error?.code !== "EEXIST") throw error
-      try {
-        const s = await stat(file)
-        if (Date.now() - s.mtimeMs > LOCK_STALE_MS) {
-          await unlink(file).catch(() => {})
-          continue
-        }
-      } catch {
-        // Lock disappeared between EEXIST and stat.
-      }
-      await sleep(LOCK_RETRY_MS)
-    }
-  }
-  throw new Error(`Timed out acquiring Mission state lock for session ${sessionID}`)
+  return new MissionStore(stateDir).withLock(sessionID, fn)
 }
 
 function normalizeObjective(value) {
@@ -288,18 +626,29 @@ function normalizeCheckpoints(value) {
 
 function normalizeMission(mission) {
   if (!mission || typeof mission !== "object") throw new Error("Invalid Mission state.")
-  const status = MISSION_STATUSES.includes(mission.status) ? mission.status : "active"
+  if (!Number.isSafeInteger(mission.version) || !SUPPORTED_SCHEMA_VERSIONS.has(mission.version)) {
+    throw new Error("Unsupported Mission schema version.")
+  }
+  if (!MISSION_STATUSES.includes(mission.status)) throw new Error("Invalid Mission status.")
+  if (typeof mission.sessionID !== "string" || !mission.sessionID.trim()) {
+    throw new Error("Invalid Mission session identity.")
+  }
+  if (typeof mission.missionID !== "string" || !mission.missionID.trim()) {
+    throw new Error("Invalid Mission identity.")
+  }
+  const status = mission.status
   const at = nowMs()
   const usageByMessage = normalizedUsageMap(mission.usageByMessage)
   const usageKeys = Object.keys(usageByMessage)
-  const trimmedUsage = usageKeys.length > ACCOUNTING_ENTRY_LIMIT
+  const usageWasTrimmed = usageKeys.length > ACCOUNTING_ENTRY_LIMIT
+  const trimmedUsage = usageWasTrimmed
     ? Object.fromEntries(usageKeys.slice(-ACCOUNTING_ENTRY_LIMIT).map((key) => [key, usageByMessage[key]]))
     : usageByMessage
 
   return {
     version: SCHEMA_VERSION,
     sessionID: String(mission.sessionID),
-    missionID: String(mission.missionID || randomUUID()),
+    missionID: mission.missionID.trim(),
     objective: normalizeObjective(mission.objective),
     status,
     tokenBudget: normalizeTokenBudget(mission.tokenBudget),
@@ -333,29 +682,32 @@ function normalizeMission(mission) {
     budgetWrapupSent: Boolean(mission.budgetWrapupSent),
     schedulerLease: normalizeSchedulerLease(mission.schedulerLease),
     usageByMessage: trimmedUsage,
+    accounting: {
+      trackedMessages: Object.keys(trimmedUsage).length,
+      maxEntries: ACCOUNTING_ENTRY_LIMIT,
+      truncated: Boolean(mission.accounting?.truncated || usageWasTrimmed),
+    },
     runtime: normalizeRuntime(mission.runtime),
   }
 }
 
 async function readMission(stateDir, sessionID) {
-  const file = missionPath(stateDir, sessionID)
+  const store = new MissionStore(stateDir)
   let raw
   try {
-    raw = await readFile(file, "utf8")
+    raw = await store.read(sessionID)
   } catch (error) {
     if (error?.code === "ENOENT") return null
     throw error
   }
   try {
-    return normalizeMission(JSON.parse(raw))
+    if (raw === null) return null
+    const mission = normalizeMission(raw)
+    if (mission.sessionID !== String(sessionID)) throw new Error("Mission session identity does not match its state file.")
+    return mission
   } catch (error) {
-    const quarantineDir = path.join(stateDir, "corrupt")
-    await mkdir(quarantineDir, { recursive: true })
-    const quarantine = path.join(
-      quarantineDir,
-      `${path.basename(file)}.${Date.now()}.${randomUUID()}.corrupt`,
-    )
-    await rename(file, quarantine)
+    if (error?.code === "MISSION_STATE_CORRUPT") throw error
+    const quarantine = await store.quarantine(sessionID)
     const diagnostic = new Error(`Mission state is corrupt and was quarantined: ${quarantine}`)
     diagnostic.code = "MISSION_STATE_CORRUPT"
     diagnostic.cause = error
@@ -364,12 +716,8 @@ async function readMission(stateDir, sessionID) {
 }
 
 async function writeMissionUnlocked(stateDir, mission) {
-  await ensureDirs(stateDir)
   const normalized = normalizeMission(mission)
-  const file = missionPath(stateDir, normalized.sessionID)
-  const temp = `${file}.${process.pid}.${randomUUID()}.tmp`
-  await writeFile(temp, JSON.stringify(normalized, null, 2) + "\n", { encoding: "utf8", mode: 0o600 })
-  await rename(temp, file)
+  await new MissionStore(stateDir).write(normalized.sessionID, normalized)
   return normalized
 }
 
@@ -378,10 +726,7 @@ async function writeMission(stateDir, mission) {
 }
 
 async function deleteMission(stateDir, sessionID) {
-  return withSessionLock(stateDir, sessionID, async () => {
-    await rm(missionPath(stateDir, sessionID), { force: true })
-    return true
-  })
+  return new MissionStore(stateDir).remove(sessionID)
 }
 
 function freezeClock(mission, at = nowMs()) {
@@ -493,7 +838,7 @@ async function createMission(
   sessionID,
   objective,
   tokenBudget = null,
-  { maxTokenBudget = null, defaultTokenBudget = null, maxAutomaticTurns = null, maxActiveSeconds = null, maxNoProgressTurns = null, requirements = [], verification = [] } = {},
+  { maxTokenBudget = null, defaultTokenBudget = null, maxAutomaticTurns = null, maxActiveSeconds = null, maxNoProgressTurns = null, requirements = [], verification = [], baselineSamples = [] } = {},
 ) {
   return withSessionLock(stateDir, sessionID, async () => {
     const existing = await readMission(stateDir, sessionID)
@@ -507,6 +852,19 @@ async function createMission(
     const created = newMission(sessionID, objective, budget)
     created.requirements = normalizeRequirements(requirements)
     created.verification = normalizeVerification(verification)
+    const ledger = new UsageLedger({
+      createdAtMs: 0,
+      rootSessionID: sessionID,
+      maxEntries: ACCOUNTING_ENTRY_LIMIT,
+    })
+    ledger.record(baselineSamples)
+    if (ledger.truncated) {
+      const error = new Error(`Mission usage baseline exceeds the ${ACCOUNTING_ENTRY_LIMIT}-message watermark capacity.`)
+      error.code = "MISSION_BASELINE_TOO_LARGE"
+      throw error
+    }
+    created.usageByMessage = Object.fromEntries(ledger.usageByMessage)
+    created.accounting = ledger.completeness()
     appendJournal(created, "created", { objective: created.objective })
     created.limits = {
       maxAutomaticTurns: normalizeLimit(maxAutomaticTurns),
@@ -631,6 +989,7 @@ async function refreshMissionEvidence(stateDir, sessionID, fingerprint, expected
     const mission = await readMission(stateDir, sessionID)
     if (!mission || !ensureExpectedMission(mission, expectedMissionID)) return null
     const value = String(fingerprint || "")
+    if (!value) return mission
     if (value && mission.evidenceFingerprint && value !== mission.evidenceFingerprint) {
       for (const requirement of mission.requirements) {
         for (const evidence of requirement.evidence) evidence.stale = true
@@ -667,6 +1026,7 @@ async function missionReport(stateDir, sessionID) {
     if (requirement.evidence.some((entry) => entry.passed === false)) unresolvedRisks.push(`Failed verification: ${requirement.id}`)
   }
   if (mission.stopReason) unresolvedRisks.push(`Stop reason: ${mission.stopReason}`)
+  if (mission.accounting.truncated) unresolvedRisks.push("Usage accounting watermark history was truncated")
   return {
     missionID: mission.missionID,
     objective: mission.objective,
@@ -680,6 +1040,7 @@ async function missionReport(stateDir, sessionID) {
     checkpoints: mission.checkpoints,
     verificationSummary,
     unresolvedRisks,
+    accounting: mission.accounting,
   }
 }
 
@@ -797,36 +1158,8 @@ async function consumeContinuationDeferral(stateDir, sessionID, expectedMissionI
   })
 }
 
-function isPlanMode(info) {
-  const mode = String(info?.mode || "").toLowerCase()
-  const agent = String(info?.agent || "").toLowerCase()
-  return mode === "plan" || agent === "plan"
-}
-
 function extractAssistantUsage(message, { excludePlanMode = true } = {}) {
-  const info = message?.info ?? message
-  if (!info || info.role !== "assistant") return null
-  if (excludePlanMode && isPlanMode(info)) {
-    return {
-      id: String(info.id || info.messageID || ""),
-      createdAtMs: Number(info.time?.created) || 0,
-      completedAtMs: Number(info.time?.completed) || 0,
-      tokens: 0,
-      excluded: "plan_mode",
-    }
-  }
-  const tokens = info.tokens || {}
-  const cache = tokens.cache || {}
-  const input = Math.max(0, Number(tokens.input) || 0)
-  const cachedInput = Math.max(0, Number(cache.read) || 0)
-  const output = Math.max(0, Number(tokens.output) || 0)
-  return {
-    id: String(info.id || info.messageID || ""),
-    createdAtMs: Number(info.time?.created) || 0,
-    completedAtMs: Number(info.time?.completed) || 0,
-    tokens: Math.max(0, input - cachedInput) + output,
-    excluded: null,
-  }
+  return extractLedgerUsage(message, { excludePlanMode })
 }
 
 function accountingKey(sessionID, messageID) {
@@ -880,30 +1213,20 @@ async function accountMissionUsage(
     const mission = await readMission(stateDir, sessionID)
     if (!mission || !ensureExpectedMission(mission, expectedMissionID)) return null
 
-    const usageByMessage = { ...mission.usageByMessage }
-    let rootDelta = 0
-    let descendantDelta = 0
+    const ledger = new UsageLedger({
+      createdAtMs: mission.createdAtMs,
+      rootSessionID: sessionID,
+      usageByMessage: mission.usageByMessage,
+      maxEntries: ACCOUNTING_ENTRY_LIMIT,
+    })
+    const { rootDelta, descendantDelta } = ledger.record(samples, { excludePlanMode })
 
-    for (const sample of samples || []) {
-      const childSessionID = String(sample?.sessionID || sessionID)
-      const usage = extractAssistantUsage(sample?.message ?? sample, { excludePlanMode })
-      if (!usage || !usage.id) continue
-      const key = accountingKey(childSessionID, usage.id)
-      const hasSeededBaseline = Object.prototype.hasOwnProperty.call(usageByMessage, key)
-      const timestamp = usage.completedAtMs || usage.createdAtMs
-      if (timestamp && timestamp < mission.createdAtMs && !hasSeededBaseline) continue
-      const previous = Math.max(0, Number(usageByMessage[key]) || 0)
-      if (usage.tokens <= previous) continue
-      const delta = usage.tokens - previous
-      usageByMessage[key] = usage.tokens
-      if (childSessionID === sessionID) rootDelta += delta
-      else descendantDelta += delta
+    mission.usageByMessage = Object.fromEntries(ledger.usageByMessage)
+    const completeness = ledger.completeness()
+    mission.accounting = {
+      ...completeness,
+      truncated: Boolean(mission.accounting?.truncated || completeness.truncated),
     }
-
-    const keys = Object.keys(usageByMessage)
-    mission.usageByMessage = keys.length > ACCOUNTING_ENTRY_LIMIT
-      ? Object.fromEntries(keys.slice(-ACCOUNTING_ENTRY_LIMIT).map((key) => [key, usageByMessage[key]]))
-      : usageByMessage
 
     mission.rootTokensUsed += rootDelta
     mission.descendantTokensUsed += descendantDelta
@@ -996,7 +1319,8 @@ async function renewSchedulerLease(
       !mission ||
       (mission.status !== "active" && mission.status !== "budget_limited") ||
       !ensureExpectedMission(mission, expectedMissionID) ||
-      mission.schedulerLease?.owner !== String(owner)
+      mission.schedulerLease?.owner !== String(owner) ||
+      mission.schedulerLease.expiresAtMs <= at
     ) return null
     mission.schedulerLease.expiresAtMs = at + duration
     mission.updatedAtMs = Math.max(mission.updatedAtMs, at)
@@ -1358,19 +1682,10 @@ async function cleanupStateDir(stateDir) {
   await rm(stateDir, { recursive: true, force: true })
 }
 
-import { tool } from "@opencode-ai/plugin"
-import { execFile } from "node:child_process"
-import { promisify } from "node:util"
 const PLUGIN_ID = "opencode-mission"
 const DEFAULT_COMMAND = "mission"
 const DEFAULT_ALIAS = "msn"
-const continuationInFlight = new Set()
-const continuationRechecks = new Map()
-const execFileAsync = promisify(execFile)
-
-function unwrapData(value) {
-  return value?.data ?? value
-}
+const defaultGitAdapter = createGitAdapter()
 
 function getEventSessionID(event) {
   return event?.properties?.sessionID || event?.properties?.sessionId || event?.sessionID || event?.sessionId || null
@@ -1394,6 +1709,12 @@ function isAbortError(text) {
   return /(?:aborted|cancelled|canceled|MessageAbortedError|AbortError|interrupted)/i.test(text)
 }
 
+function isTransientAccountingError(error) {
+  return error?.code === "OPENCODE_MESSAGES_FAILED" ||
+    error?.code === "OPENCODE_CHILDREN_FAILED" ||
+    error?.code === "OPENCODE_PROMPT_FAILED"
+}
+
 async function log(client, level, message, extra = undefined) {
   try {
     await client.app.log({
@@ -1404,88 +1725,18 @@ async function log(client, level, message, extra = undefined) {
   }
 }
 
-async function listMessages(client, sessionID) {
-  try {
-    const response = await client.session.messages({ path: { id: sessionID } })
-    const data = unwrapData(response)
-    return Array.isArray(data) ? data : []
-  } catch (error) {
-    const failure = new Error(`OpenCode messages API failed for session ${sessionID}: ${error?.message || String(error)}`)
-    failure.code = "OPENCODE_MESSAGES_FAILED"
-    failure.cause = error
-    throw failure
-  }
-}
+function listMessages(client, sessionID) { return (client.adapter || client).messages(sessionID) }
+function listChildren(client, sessionID) { return (client.adapter || client).children(sessionID) }
 
-async function listChildren(client, sessionID) {
-  try {
-    const response = await client.session.children({ path: { id: sessionID } })
-    const data = unwrapData(response)
-    return Array.isArray(data) ? data : []
-  } catch (error) {
-    const failure = new Error(`OpenCode children API failed for session ${sessionID}: ${error?.message || String(error)}`)
-    failure.code = "OPENCODE_CHILDREN_FAILED"
-    failure.cause = error
-    throw failure
-  }
-}
-
-/**
- * OpenCode exposes parent/child sessions rather than Codex's internal descendant
- * token accumulator. We reconstruct the same budget semantics by traversing the
- * session tree and accounting assistant-message deltas under the root Mission.
- */
-async function collectUsageSamples(
-  client,
-  rootSessionID,
-  { maxDepth = 6, maxSessions = 96 } = {},
-) {
-  const samples = []
-  const queue = [{ id: rootSessionID, depth: 0 }]
-  const seen = new Set()
-
-  while (queue.length > 0 && seen.size < maxSessions) {
-    const current = queue.shift()
-    if (!current?.id || seen.has(current.id)) continue
-    seen.add(current.id)
-
-    const messages = await listMessages(client, current.id)
-    for (const message of messages) {
-      samples.push({
-        sessionID: current.id,
-        message,
-        descendant: current.id !== rootSessionID,
-      })
-    }
-
-    if (current.depth >= maxDepth) continue
-    const children = await listChildren(client, current.id)
-    for (const child of children) {
-      const id = child?.id || child?.sessionID || child?.sessionId
-      if (id && !seen.has(String(id))) queue.push({ id: String(id), depth: current.depth + 1 })
-    }
-  }
-
-  return samples
-}
-
-async function accountLiveMission(client, stateDir, sessionID, missionID, options) {
-  const samples = await collectUsageSamples(client, sessionID, {
+async function accountLiveMission(adapter, stateDir, sessionID, missionID, options) {
+  const samples = await collectSessionUsage(adapter.adapter || adapter, sessionID, {
     maxDepth: Math.max(0, Number(options?.descendant_max_depth ?? 6)),
     maxSessions: Math.max(1, Number(options?.descendant_max_sessions ?? 96)),
   })
   return accountMissionUsage(stateDir, sessionID, samples, { expectedMissionID: missionID })
 }
 
-async function sendPrompt(client, sessionID, text) {
-  const response = await client.session.prompt({
-    path: { id: sessionID },
-    body: {
-      parts: [{ type: "text", text, synthetic: true, metadata: { source: "opencode-mission" } }],
-    },
-  })
-  return unwrapData(response)
-}
+function sendPrompt(client, sessionID, text) { return (client.adapter || client).prompt(sessionID, text) }
 
 function normalizePromptResponse(response) {
   if (!response) return null
@@ -1532,7 +1783,7 @@ function normalizeVerificationOptions(value) {
   })
 }
 
-export function normalizePluginOptions(options = {}) {
+function normalizePluginOptions(options = {}) {
   if (!options || typeof options !== "object" || Array.isArray(options)) {
     throw new Error("Mission plugin options must be an object")
   }
@@ -1568,6 +1819,11 @@ export function normalizePluginOptions(options = {}) {
     max_active_seconds: integerOption(options, "max_active_seconds", null, 1),
     max_no_progress_turns: integerOption(options, "max_no_progress_turns", null, 1),
     verification: normalizeVerificationOptions(options.verification),
+    accounting_retry: normalizeRetryPolicy(options.accounting_retry ?? {
+      maxAttempts: 3,
+      baseDelayMs: 500,
+      maxDelayMs: 5000,
+    }),
     exec_tool_names: options.exec_tool_names?.map((name) => name.trim()),
   })
 }
@@ -1576,7 +1832,17 @@ async function missionDiagnostics(client, stateDir, sessionID) {
   const checks = []
   try {
     const mission = await readMission(stateDir, sessionID)
-    checks.push(`state: ok (${mission ? mission.status : "no Mission"})`)
+    if (!mission) {
+      checks.push("state: ok (no Mission)")
+    } else {
+      const lease = mission.schedulerLease
+      const leaseState = lease
+        ? lease.expiresAtMs <= Date.now() ? `expired (${lease.owner})` : `held (${lease.owner})`
+        : "none"
+      checks.push(`state: ok (${mission.status}, schema ${mission.version})`)
+      checks.push(`scheduler lease: ${leaseState}`)
+      checks.push(`accounting: ${mission.accounting.truncated ? "warning, watermark history truncated" : "ok"}`)
+    }
   } catch (error) {
     checks.push(`state: error (${error?.message || String(error)})`)
   }
@@ -1630,9 +1896,7 @@ async function executeVerificationGate($, cwd, stateDir, sessionID, mission, gat
 
 async function getWorktreeFingerprint(cwd) {
   try {
-    const { stdout } = await execFileAsync("git", ["rev-parse", "HEAD"], { cwd: cwd || process.cwd() })
-    const { stdout: status } = await execFileAsync("git", ["status", "--porcelain=v1"], { cwd: cwd || process.cwd() })
-    return `${stdout.trim()}|${status}`.slice(0, 4000)
+    return await defaultGitAdapter.fingerprint(cwd || process.cwd())
   } catch {
     return null
   }
@@ -1703,20 +1967,17 @@ async function handleSlashCommand(client, $, workspaceDirectory, stateDir, sessi
 
   if (parsed.op === "set") {
     if (!parsed.objective) throw new Error("Usage: /mission [--budget N] <objective>")
-    let mission = await createMission(
+    const baselineSamples = await collectSessionUsage(client.adapter || client, sessionID, {
+      maxDepth: Math.max(0, Number(options?.descendant_max_depth ?? 6)),
+      maxSessions: Math.max(1, Number(options?.descendant_max_sessions ?? 96)),
+    })
+    const mission = await createMission(
       stateDir,
       sessionID,
       parsed.objective,
       parsed.tokenBudget,
-      createOptions,
+      { ...createOptions, baselineSamples },
     )
-    const baselineSamples = await collectUsageSamples(client, sessionID, {
-      maxDepth: Math.max(0, Number(options?.descendant_max_depth ?? 6)),
-      maxSessions: Math.max(1, Number(options?.descendant_max_sessions ?? 96)),
-    })
-    mission = (await seedMissionUsageBaselines(stateDir, sessionID, baselineSamples, {
-      expectedMissionID: mission.missionID,
-    })) || mission
     return commandResultPrompt(`Mission activated.\n${conciseStatus(mission)}`, mission, true)
   }
 
@@ -1808,35 +2069,19 @@ async function recordRootTurnOutcomes(stateDir, sessionID, mission, messages, op
   return current
 }
 
-function clearScheduledRecheck(sessionID) {
-  const timer = continuationRechecks.get(sessionID)
-  if (timer) clearTimeout(timer)
-  continuationRechecks.delete(sessionID)
-}
-
-function scheduleRecheck(client, stateDir, sessionID, options, delayMs) {
-  clearScheduledRecheck(sessionID)
-  const timer = setTimeout(() => {
-    continuationRechecks.delete(sessionID)
-    void processIdle(client, stateDir, sessionID, options)
-  }, Math.max(0, delayMs))
-  continuationRechecks.set(sessionID, timer)
-}
-
-async function processIdle(client, stateDir, sessionID, options) {
-  if (continuationInFlight.has(sessionID)) return
-  continuationInFlight.add(sessionID)
-
+async function processIdle(scheduler, host, stateDir, sessionID, options) {
+  return scheduler.runExclusive(sessionID, async () => {
   let shouldRecheck = false
   let leaseOwner = null
   let leaseMissionID = null
-  let leaseHeartbeat = null
+  let expectedMissionID = null
+  let accountingPhase = "pre"
   let recheckDelay = Math.max(50, Number(options?.min_continue_interval_ms ?? 250))
 
   try {
     let mission = await readMission(stateDir, sessionID)
     if (!mission) return
-    const expectedMissionID = mission.missionID
+    expectedMissionID = mission.missionID
     mission = await refreshMissionEvidence(stateDir, sessionID, await getWorktreeFingerprint(options.worktree), expectedMissionID) || mission
     leaseOwner = newSchedulerOwnerID()
     const lease = await acquireSchedulerLease(stateDir, sessionID, leaseOwner, {
@@ -1851,34 +2096,37 @@ async function processIdle(client, stateDir, sessionID, options) {
       return
     }
     leaseMissionID = expectedMissionID
-    leaseHeartbeat = setInterval(() => {
+    scheduler.startHeartbeat(sessionID, Math.max(250, Math.floor(options.scheduler_lease_ms / 3)), () => {
       void renewSchedulerLease(stateDir, sessionID, leaseOwner, {
         expectedMissionID,
         leaseMs: options.scheduler_lease_ms,
       }).catch(() => {})
-    }, Math.max(250, Math.floor(options.scheduler_lease_ms / 3)))
+    })
 
-    const rootMessages = await listMessages(client, sessionID)
+    const rootMessages = await listMessages(host, sessionID)
     mission = (await recordRootTurnOutcomes(stateDir, sessionID, mission, rootMessages, options)) || mission
     if (mission.missionID !== expectedMissionID) return
 
-    mission = (await accountLiveMission(client, stateDir, sessionID, expectedMissionID, options)) || mission
+    mission = (await accountLiveMission(host, stateDir, sessionID, expectedMissionID, options)) || mission
     if (mission.missionID !== expectedMissionID) return
+    scheduler.resetRetries(sessionID, "pre")
 
     if (mission.status === "budget_limited") {
       if (!mission.budgetWrapupSent) {
-        const marked = await markBudgetWrapupSent(stateDir, sessionID, expectedMissionID)
-        if (marked) {
-          const response = normalizePromptResponse(await sendPrompt(client, sessionID, budgetLimitPrompt(marked)))
-          if (response) {
-            await accountLiveMission(client, stateDir, sessionID, expectedMissionID, options)
-            await recordMissionTurnOutcome(stateDir, sessionID, response, {
-              expectedMissionID,
-              automatic: false,
-              failedExecThreshold: Math.max(1, Number(options?.failed_exec_threshold ?? 3)),
-              emptyAutomaticThreshold: Math.max(1, Number(options?.empty_auto_threshold ?? 3)),
-            })
-          }
+        accountingPhase = "prompt"
+        const response = normalizePromptResponse(await sendPrompt(host, sessionID, budgetLimitPrompt(mission)))
+        if (response) {
+          scheduler.resetRetries(sessionID, "prompt")
+          accountingPhase = "post"
+          const marked = await markBudgetWrapupSent(stateDir, sessionID, expectedMissionID)
+          if (!marked) return
+          await accountLiveMission(host, stateDir, sessionID, expectedMissionID, options)
+          await recordMissionTurnOutcome(stateDir, sessionID, response, {
+            expectedMissionID,
+            automatic: false,
+            failedExecThreshold: Math.max(1, Number(options?.failed_exec_threshold ?? 3)),
+            emptyAutomaticThreshold: Math.max(1, Number(options?.empty_auto_threshold ?? 3)),
+          })
         }
       }
       return
@@ -1909,10 +2157,14 @@ async function processIdle(client, stateDir, sessionID, options) {
 
     // session.prompt is awaited, so this is one physical OpenCode turn, mirroring
     // Codex start_turn_if_idle rather than asking the same turn to recurse.
-    const response = normalizePromptResponse(await sendPrompt(client, sessionID, continuationPrompt(mission)))
+    accountingPhase = "prompt"
+    const response = normalizePromptResponse(await sendPrompt(host, sessionID, continuationPrompt(mission)))
     if (response) {
-      mission = (await accountLiveMission(client, stateDir, sessionID, expectedMissionID, options)) || mission
+      scheduler.resetRetries(sessionID, "prompt")
+      accountingPhase = "post"
+      mission = (await accountLiveMission(host, stateDir, sessionID, expectedMissionID, options)) || mission
       if (mission.missionID !== expectedMissionID) return
+      scheduler.resetRetries(sessionID, "post")
       mission = (await recordMissionTurnOutcome(stateDir, sessionID, response, {
         expectedMissionID,
         automatic: true,
@@ -1924,18 +2176,47 @@ async function processIdle(client, stateDir, sessionID, options) {
 
     shouldRecheck = mission?.missionID === expectedMissionID && mission?.status === "active"
   } catch (error) {
-    await log(client, "error", "Mission idle continuation failed", {
+    if (expectedMissionID && isTransientAccountingError(error)) {
+      const retry = scheduler.nextRetry(sessionID, options.accounting_retry, accountingPhase)
+      if (retry.retry) {
+        shouldRecheck = true
+        recheckDelay = retry.delayMs
+      } else {
+        await setStoppedStatus(
+          stateDir,
+          sessionID,
+          "paused",
+          `Continuation host API unavailable after ${retry.attempt} attempts: ${error.message}`.slice(0, 500),
+          expectedMissionID,
+        ).catch(() => {})
+      }
+    } else if (expectedMissionID && error?.code === "ACCOUNTING_TRAVERSAL_INCOMPLETE") {
+      scheduler.resetRetries(sessionID)
+      await setStoppedStatus(
+        stateDir,
+        sessionID,
+        "paused",
+        `Accounting incomplete: ${error.message}`.slice(0, 500),
+        expectedMissionID,
+      ).catch(() => {})
+    }
+    await log(host.client, "error", "Mission idle continuation failed", {
       sessionID,
+      code: error?.code || null,
       error: String(error?.stack || error),
     })
   } finally {
-    if (leaseHeartbeat) clearInterval(leaseHeartbeat)
+    scheduler.stopHeartbeat(sessionID)
     if (leaseOwner && leaseMissionID) {
       await releaseSchedulerLease(stateDir, sessionID, leaseOwner, leaseMissionID).catch(() => {})
     }
-    continuationInFlight.delete(sessionID)
-    if (shouldRecheck) scheduleRecheck(client, stateDir, sessionID, options, recheckDelay)
+    if (shouldRecheck) {
+      scheduler.scheduleRecheck(sessionID, recheckDelay, () => {
+        void processIdle(scheduler, host, stateDir, sessionID, options)
+      })
+    }
   }
+  })
 }
 
 function completionResponse(mission) {
@@ -1951,6 +2232,9 @@ function completionResponse(mission) {
 
 export const MissionPlugin = async ({ client, $, directory }, rawOptions = {}) => {
   const options = normalizePluginOptions(rawOptions)
+  const adapter = createOpenCodeAdapter(client)
+  const host = { adapter, client }
+  const scheduler = new SchedulerState()
   const stateDir = options.state_dir ? String(options.state_dir) : defaultStateDir()
   const commandName = String(options.command_name || DEFAULT_COMMAND)
   const aliasName = options.alias === false ? null : String(options.alias || DEFAULT_ALIAS)
@@ -1988,7 +2272,7 @@ export const MissionPlugin = async ({ client, $, directory }, rawOptions = {}) =
         async execute(_args, context) {
           let mission = await readMission(stateDir, context.sessionID)
           if (!mission) return JSON.stringify({ mission: null, remainingTokens: null }, null, 2)
-          mission = (await accountLiveMission(client, stateDir, context.sessionID, mission.missionID, options)) || mission
+          mission = (await accountLiveMission(host, stateDir, context.sessionID, mission.missionID, options)) || mission
           return publicMissionJSON(mission)
         },
       }),
@@ -2014,20 +2298,17 @@ export const MissionPlugin = async ({ client, $, directory }, rawOptions = {}) =
           })).optional().describe("Optional acceptance requirements that must have evidence before completion."),
         },
         async execute(args, context) {
-          let mission = await createMission(
+          const baselineSamples = await collectSessionUsage(host.adapter || host, context.sessionID, {
+            maxDepth: Math.max(0, Number(options?.descendant_max_depth ?? 6)),
+            maxSessions: Math.max(1, Number(options?.descendant_max_sessions ?? 96)),
+          })
+          const mission = await createMission(
             stateDir,
             context.sessionID,
             args.objective,
             args.token_budget ?? null,
-            { maxTokenBudget: maxBudget, defaultTokenBudget: maxBudget, requirements: args.requirements, verification: options.verification },
+            { maxTokenBudget: maxBudget, defaultTokenBudget: maxBudget, requirements: args.requirements, verification: options.verification, baselineSamples },
           )
-          const baselineSamples = await collectUsageSamples(client, context.sessionID, {
-            maxDepth: Math.max(0, Number(options?.descendant_max_depth ?? 6)),
-            maxSessions: Math.max(1, Number(options?.descendant_max_sessions ?? 96)),
-          })
-          mission = (await seedMissionUsageBaselines(stateDir, context.sessionID, baselineSamples, {
-            expectedMissionID: mission.missionID,
-          })) || mission
           return publicMissionJSON(mission)
         },
       }),
@@ -2045,7 +2326,7 @@ export const MissionPlugin = async ({ client, $, directory }, rawOptions = {}) =
           mission = await refreshMissionEvidence(stateDir, context.sessionID, await getWorktreeFingerprint(context.worktree), expectedMissionID) || mission
 
           // Mirror Codex: account the live turn before applying a stopped/completed status.
-          mission = (await accountLiveMission(client, stateDir, context.sessionID, expectedMissionID, options)) || mission
+          mission = (await accountLiveMission(host, stateDir, context.sessionID, expectedMissionID, options)) || mission
           if (mission.missionID !== expectedMissionID) throw new Error("Mission changed concurrently; status update rejected.")
 
           const reason =
@@ -2122,6 +2403,8 @@ export const MissionPlugin = async ({ client, $, directory }, rawOptions = {}) =
       } catch (error) {
         await log(client, "warn", "Mission tool-boundary accounting failed", {
           sessionID: input.sessionID,
+          code: error?.code || "MISSION_ACCOUNTING_FAILED",
+          phase: "tool.execute.after",
           error: String(error?.message || error),
         })
       }
@@ -2130,7 +2413,7 @@ export const MissionPlugin = async ({ client, $, directory }, rawOptions = {}) =
     "command.execute.before": async (input, output) => {
       if (input.command !== commandName && input.command !== aliasName) return
       try {
-        const prompt = await handleSlashCommand(client, $, directory, stateDir, input.sessionID, input.arguments, options)
+      const prompt = await handleSlashCommand(host, $, directory, stateDir, input.sessionID, input.arguments, options)
         // OpenCode keeps the original parts array; mutate it in place.
         output.parts.splice(0, output.parts.length, { type: "text", text: prompt, synthetic: true })
       } catch (error) {
@@ -2161,11 +2444,20 @@ export const MissionPlugin = async ({ client, $, directory }, rawOptions = {}) =
     },
 
     event: async ({ event }) => {
+      if (event.type === "server.instance.disposed") {
+        scheduler.dispose()
+        return
+      }
       const sessionID = getEventSessionID(event)
       if (!sessionID) return
 
+      if (event.type === "session.deleted") {
+        scheduler.disposeSession(sessionID)
+        return
+      }
+
       if (event.type === "session.idle" && autoContinue) {
-        void processIdle(client, stateDir, sessionID, options)
+        void processIdle(scheduler, host, stateDir, sessionID, options)
         return
       }
 
