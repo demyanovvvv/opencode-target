@@ -41,12 +41,7 @@ try {
   const output = { parts: [] }
   await hooks["command.execute.before"]({ command: "target", sessionID: "loop", arguments: "Finish after two mocked turns" }, output)
   await hooks.event({ event: { type: "session.idle", properties: { sessionID: "loop" } } })
-  const deadline = Date.now() + 10000
-  while (Date.now() < deadline) {
-    const current = await readTarget(stateDir, "loop")
-    if (promptCount >= 2 && current?.status === "complete" && current.tokensUsed === 60) break
-    await new Promise((resolve) => setTimeout(resolve, 25))
-  }
+  await hooks.whenIdle("loop")
   const final = await readTarget(stateDir, "loop")
   assert.equal(promptCount, 2)
   assert.equal(final.status, "complete")
@@ -92,15 +87,8 @@ try {
     hooksA.event({ event: { type: "session.idle", properties: { sessionID: "competing" } } }),
     hooksB.event({ event: { type: "session.idle", properties: { sessionID: "competing" } } }),
   ])
-  const competingDeadline = Date.now() + 10000
-  while (competingPromptCount < 1 && Date.now() < competingDeadline) {
-    await new Promise((resolve) => setTimeout(resolve, 25))
-  }
+  await Promise.all([hooksA.whenIdle("competing"), hooksB.whenIdle("competing")])
   assert.equal(competingPromptCount, 1)
-  const competingStatusDeadline = Date.now() + 10000
-  while ((await readTarget(stateDir, "competing")).status === "active" && Date.now() < competingStatusDeadline) {
-    await new Promise((resolve) => setTimeout(resolve, 10))
-  }
   assert.equal((await readTarget(stateDir, "competing")).status, "complete")
 
   let transientFailures = 0
@@ -136,12 +124,7 @@ try {
   )
   failTransientMessages = true
   await transientHooks.event({ event: { type: "session.idle", properties: { sessionID: "transient" } } })
-  const transientDeadline = Date.now() + 10000
-  while (Date.now() < transientDeadline) {
-    const current = await readTarget(stateDir, "transient")
-    if (transientPromptCount >= 1 && current?.status === "complete") break
-    await new Promise((resolve) => setTimeout(resolve, 10))
-  }
+  await transientHooks.whenIdle("transient")
   assert.equal(transientFailures, 2)
   assert.equal(transientPromptCount, 1)
   assert.equal((await readTarget(stateDir, "transient")).status, "complete")
@@ -169,10 +152,7 @@ try {
   )
   exposeDeepChild = true
   await incompleteHooks.event({ event: { type: "session.idle", properties: { sessionID: "incomplete" } } })
-  const incompleteDeadline = Date.now() + 10000
-  while ((await readTarget(stateDir, "incomplete")).status === "active" && Date.now() < incompleteDeadline) {
-    await new Promise((resolve) => setTimeout(resolve, 10))
-  }
+  await incompleteHooks.whenIdle("incomplete")
   const incompleteTarget = await readTarget(stateDir, "incomplete")
   assert.equal(incompletePromptCount, 0)
   assert.equal(incompleteTarget.status, "paused")
@@ -199,10 +179,7 @@ try {
     { sessionID: "malformed-prompt" },
   )
   await malformedPromptHooks.event({ event: { type: "session.idle", properties: { sessionID: "malformed-prompt" } } })
-  const malformedPromptDeadline = Date.now() + 10000
-  while ((await readTarget(stateDir, "malformed-prompt"))?.status === "active" && Date.now() < malformedPromptDeadline) {
-    await new Promise((resolve) => setTimeout(resolve, 10))
-  }
+  await malformedPromptHooks.whenIdle("malformed-prompt")
   const malformedPromptTarget = await readTarget(stateDir, "malformed-prompt")
   assert.equal(malformedPromptAttempts, 2)
   assert.equal(malformedPromptTarget.status, "paused")

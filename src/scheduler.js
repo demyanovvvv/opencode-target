@@ -2,6 +2,7 @@ export class SchedulerState {
   constructor(timers = globalThis) {
     this.timers = timers
     this.inFlight = new Set()
+    this.inFlightWaiters = new Map()
     this.rechecks = new Map()
     this.heartbeats = new Map()
     this.retries = new Map()
@@ -17,7 +18,30 @@ export class SchedulerState {
       return { started: true, value: await operation() }
     } finally {
       this.inFlight.delete(sessionID)
+      this.resolveIdleWaiters(sessionID)
     }
+  }
+
+  isSettled(sessionID) {
+    return !this.inFlight.has(sessionID) && !this.rechecks.has(sessionID)
+  }
+
+  resolveIdleWaiters(sessionID) {
+    if (!this.isSettled(sessionID)) return
+    const waiters = this.inFlightWaiters.get(sessionID)
+    if (!waiters) return
+    this.inFlightWaiters.delete(sessionID)
+    for (const resolve of waiters) resolve()
+  }
+
+  whenIdle(sessionID) {
+    if (this.isSettled(sessionID)) return Promise.resolve()
+    let resolve
+    const promise = new Promise((r) => { resolve = r })
+    const waiters = this.inFlightWaiters.get(sessionID) ?? new Set()
+    waiters.add(resolve)
+    this.inFlightWaiters.set(sessionID, waiters)
+    return promise
   }
 
   scheduleRecheck(sessionID, delayMs, operation) {
@@ -81,6 +105,7 @@ export class SchedulerState {
     this.clearRecheck(sessionID)
     this.stopHeartbeat(sessionID)
     this.resetRetries(sessionID)
+    this.resolveIdleWaiters(sessionID)
   }
 
   dispose() {
@@ -88,6 +113,7 @@ export class SchedulerState {
     this.disposed = true
     for (const sessionID of [...this.rechecks.keys()]) this.clearRecheck(sessionID)
     for (const sessionID of [...this.heartbeats.keys()]) this.stopHeartbeat(sessionID)
+    for (const sessionID of [...this.inFlightWaiters.keys()]) this.resolveIdleWaiters(sessionID)
     this.retries.clear()
   }
 }

@@ -253,6 +253,8 @@ export const TargetPlugin = async ({ client, $, directory }, rawOptions = {}) =>
   })
 
   return {
+    whenIdle: (sessionID) => scheduler.whenIdle(String(sessionID)),
+
     config: async (config) => {
       config.command ??= {}
       config.command[commandName] = {

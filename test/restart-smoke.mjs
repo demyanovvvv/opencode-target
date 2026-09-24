@@ -3,7 +3,7 @@ import { mkdtemp, rm } from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
 import { TargetPlugin } from "../src/server.js"
-import { readTarget } from "../src/core.js"
+import { readTarget, setStoppedStatus } from "../src/core.js"
 
 const stateDir = await mkdtemp(path.join(os.tmpdir(), "target-restart-smoke-"))
 let prompts = 0
@@ -23,8 +23,10 @@ const client = {
   session: {
     messages: async () => ({ data: [] }),
     children: async () => ({ data: [] }),
-    prompt: async () => {
+    prompt: async ({ path }) => {
       prompts += 1
+      const current = await readTarget(stateDir, path.id)
+      await setStoppedStatus(stateDir, path.id, "complete", "restart verified", current.targetID)
       return { data: message() }
     },
   },
@@ -38,8 +40,7 @@ try {
 
   const second = await TargetPlugin({ client }, { state_dir: stateDir, min_continue_interval_ms: 0 })
   await second.event({ event: { type: "session.idle", properties: { sessionID: "restart" } } })
-  const deadline = Date.now() + 10_000
-  while (prompts < 1 && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 10))
+  await second.whenIdle("restart")
   assert.equal(prompts, 1)
   assert.equal((await readTarget(stateDir, "restart")).continuationCount, 1)
   console.log("restart smoke: ok")

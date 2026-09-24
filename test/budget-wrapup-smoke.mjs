@@ -58,13 +58,9 @@ try {
     { sessionID: "budget-wrapup", message: liveMessage },
   ], { expectedTargetID: created.target.targetID })
   await hooks.event({ event: { type: "session.idle", properties: { sessionID: "budget-wrapup" } } })
+  await hooks.whenIdle("budget-wrapup")
 
-  const deadline = Date.now() + 10_000
-  let target = await readTarget(stateDir, "budget-wrapup")
-  while (Date.now() < deadline && (promptAttempts < 2 || !target?.budgetWrapupSent)) {
-    await new Promise((resolve) => setTimeout(resolve, 10))
-    target = await readTarget(stateDir, "budget-wrapup")
-  }
+  const target = await readTarget(stateDir, "budget-wrapup")
   assert.equal(promptAttempts, 2)
   assert.equal(target.status, "budget_limited")
   assert.equal(target.budgetWrapupSent, true)

@@ -70,6 +70,64 @@ test("scheduler instances do not share in-process ownership", async () => {
   await running
 })
 
+test("whenIdle resolves immediately when no work is in flight", async () => {
+  const scheduler = new SchedulerState()
+  let settled = false
+  const pending = scheduler.whenIdle("session-a").then(() => { settled = true })
+  await Promise.resolve()
+  assert.equal(settled, true)
+  await pending
+})
+
+test("whenIdle waits for in-flight work and any scheduled recheck", async () => {
+  const timers = fakeTimers()
+  const scheduler = new SchedulerState(timers.api)
+  let release
+  const blocked = new Promise((resolve) => { release = resolve })
+  let recheckRun = null
+  const run = scheduler.runExclusive("session-a", async () => {
+    await blocked
+    scheduler.scheduleRecheck("session-a", 10, () => {
+      recheckRun = scheduler.runExclusive("session-a", async () => {})
+    })
+  })
+  let settled = false
+  const idle = scheduler.whenIdle("session-a").then(() => { settled = true })
+  await Promise.resolve()
+  assert.equal(settled, false)
+
+  release()
+  await run
+  await Promise.resolve()
+  assert.equal(settled, false, "a pending recheck keeps the session unsettled")
+  assert.equal(scheduler.isSettled("session-a"), false)
+
+  const recheck = [...timers.timeouts.values()].at(-1)
+  recheck.callback()
+  await recheckRun
+  await Promise.resolve()
+  assert.equal(settled, true)
+  await idle
+})
+
+test("disposing a session resolves pending idle waiters", async () => {
+  const scheduler = new SchedulerState()
+  let release
+  const blocked = new Promise((resolve) => { release = resolve })
+  let settled = false
+  const idle = scheduler.whenIdle("session-a").then(() => { settled = true })
+  const run = scheduler.runExclusive("session-a", () => blocked)
+  await Promise.resolve()
+
+  scheduler.disposeSession("session-a")
+  await Promise.resolve()
+  assert.equal(settled, true)
+
+  release()
+  await run
+  await idle
+})
+
 test("scheduleRecheck replaces the existing session timer before invoking", () => {
   const timers = fakeTimers()
   const scheduler = new SchedulerState(timers.api)
