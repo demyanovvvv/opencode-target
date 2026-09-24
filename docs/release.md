@@ -40,11 +40,14 @@ Releases run through the manual `Release` GitHub Actions workflow
 (`.github/workflows/release.yml`). The package is private, so the workflow never publishes to npm.
 
 1. Confirm `package.json` is private and its version matches the version you intend to release.
-2. Trigger the workflow from the Actions tab (`workflow_dispatch`) with the target `version`.
-3. Leave `dry_run` enabled to build and verify only. Disable it to upload the packed archive as a
-   workflow artifact.
-4. The workflow requires the protected `release` environment, runs `npm run check` and
-   `npm run release:check`, then runs `npm pack` and (unless `dry_run`) uploads the tarball.
+2. Add the matching `## [<version>]` section to `CHANGELOG.md`; the workflow extracts it as the
+   release notes and fails if the section is missing or empty.
+3. Trigger the workflow from the Actions tab (`workflow_dispatch`) with the target `version`.
+4. Leave `dry_run` enabled to build and verify only. Disable it to upload the packed archive as a
+   workflow artifact **and** publish a GitHub release tagged `v<version>` with the tarball attached
+   and marked latest.
+5. The workflow requires the protected `release` environment, runs `npm run check` and
+   `npm run release:check`, then runs `npm pack` followed by the publish steps.
 
 For local archive distribution:
 

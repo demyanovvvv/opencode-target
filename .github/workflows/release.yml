@@ -8,7 +8,7 @@ on:
         required: true
         type: string
       dry_run:
-        description: Build and verify only; skip artifact upload.
+        description: Build and verify only; skip artifact upload and GitHub release.
         required: false
         default: true
         type: boolean
@@ -24,6 +24,8 @@ jobs:
   release:
     runs-on: ubuntu-latest
     environment: release
+    permissions:
+      contents: write
     strategy:
       matrix:
         node-version: [22]
@@ -55,3 +57,16 @@ jobs:
           name: opencode-target-${{ inputs.version }}
           path: "*.tgz"
           if-no-files-found: error
+      - name: Extract release notes from changelog
+        if: ${{ !inputs.dry_run }}
+        run: node scripts/extract-changelog.mjs "${{ inputs.version }}" release-notes.md
+      - name: Publish GitHub release
+        if: ${{ !inputs.dry_run }}
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ inputs.version }}
+          name: v${{ inputs.version }}
+          body_path: release-notes.md
+          files: "*.tgz"
+          fail_on_unmatched_files: true
+          make_latest: true
