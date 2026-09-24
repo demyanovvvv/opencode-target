@@ -1,12 +1,12 @@
 ---
-name: mission-verification
+name: target-verification
 description: >-
-  Verify OpenCode Mission changes with fresh build, syntax, unit, and plugin continuation
+  Verify OpenCode Target changes with fresh build, syntax, unit, and plugin continuation
   evidence before reporting success. Use after every behavior, build, or documentation change
   that can affect generated output or release readiness.
 ---
 
-# Mission Verification
+# Target Verification
 
 ## Required gate
 
@@ -18,7 +18,7 @@ npm run check
 
 This command must:
 
-- rebuild `dist/mission.js` from `src/core.js` and `src/server.js`;
+- rebuild `dist/target.js` from `src/core.js` and `src/server.js`;
 - syntax-check both source modules and the generated plugin;
 - run `test/core.test.js`;
 - run `test/server-smoke.mjs`;
@@ -34,12 +34,12 @@ npm run test:smoke
 npm run build:local
 node --check src/core.js
 node --check src/server.js
-node --check dist/mission.js
+node --check dist/target.js
 ```
 
 ## Evidence rules
 
 - Do not claim tests pass without running the relevant command in the current change.
 - Read the complete command result and exit code.
-- Treat generated `dist/mission.js` changes as expected only when caused by source changes.
+- Treat generated `dist/target.js` changes as expected only when caused by source changes.
 - If OpenCode API behavior is involved, verify against the target package version documented in `docs/compatibility.md`.

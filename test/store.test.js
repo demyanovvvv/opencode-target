@@ -3,14 +3,14 @@ import { mkdir, mkdtemp, readFile, stat, writeFile } from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
 import test from "node:test"
-import { MissionStore } from "../src/store.js"
+import { TargetStore } from "../src/store.js"
 
 async function withStore(fn) {
-  const dir = await mkdtemp(path.join(os.tmpdir(), "opencode-mission-store-"))
-  try { await fn(new MissionStore(dir)) } finally { await import("node:fs/promises").then(({ rm }) => rm(dir, { recursive: true, force: true })) }
+  const dir = await mkdtemp(path.join(os.tmpdir(), "opencode-target-store-"))
+  try { await fn(new TargetStore(dir)) } finally { await import("node:fs/promises").then(({ rm }) => rm(dir, { recursive: true, force: true })) }
 }
 
-test("MissionStore writes atomically and reads JSON state", async () => {
+test("TargetStore writes atomically and reads JSON state", async () => {
   await withStore(async (store) => {
     await store.write("session", { status: "active", value: 1 })
     assert.deepEqual(await store.read("session"), { status: "active", value: 1 })
@@ -18,28 +18,69 @@ test("MissionStore writes atomically and reads JSON state", async () => {
   })
 })
 
-test("MissionStore encodes session IDs without path traversal or collisions", async () => {
+test("TargetStore retries transient Windows rename failures on write", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "opencode-target-store-"))
+  const { rm, rename } = await import("node:fs/promises")
+  try {
+    let attempts = 0
+    const store = new TargetStore(dir, {
+      rename: async (from, to) => {
+        attempts += 1
+        if (attempts <= 3) {
+          const error = new Error("transient rename")
+          error.code = "EPERM"
+          throw error
+        }
+        return rename(from, to)
+      },
+    })
+    await store.write("session", { status: "active", value: 7 })
+    assert.equal(attempts, 4)
+    assert.deepEqual(await store.read("session"), { status: "active", value: 7 })
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test("TargetStore surfaces non-transient rename failures on write", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "opencode-target-store-"))
+  const { rm } = await import("node:fs/promises")
+  try {
+    const store = new TargetStore(dir, {
+      rename: async () => {
+        const error = new Error("permanent rename")
+        error.code = "ENOSPC"
+        throw error
+      },
+    })
+    await assert.rejects(() => store.write("session", { status: "active" }), { code: "ENOSPC" })
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test("TargetStore encodes session IDs without path traversal or collisions", async () => {
   await withStore(async (store) => {
     const traversal = store.path("..\\..\\outside/session")
     const plain = store.path("outside/session")
     assert.notEqual(traversal, plain)
-    assert.equal(path.dirname(traversal), path.join(store.stateDir, "missions"))
-    assert.equal(path.dirname(plain), path.join(store.stateDir, "missions"))
+    assert.equal(path.dirname(traversal), path.join(store.stateDir, "targets"))
+    assert.equal(path.dirname(plain), path.join(store.stateDir, "targets"))
     await store.write("..\\..\\outside/session", { value: 1 })
     assert.deepEqual(await store.read("..\\..\\outside/session"), { value: 1 })
   })
 })
 
-test("MissionStore quarantines corrupt JSON and exposes a typed error", async () => {
+test("TargetStore quarantines corrupt JSON and exposes a typed error", async () => {
   await withStore(async (store) => {
     await mkdir(path.dirname(store.path("broken")), { recursive: true })
     await writeFile(store.path("broken"), "{broken", "utf8")
-    await assert.rejects(() => store.read("broken"), { code: "MISSION_STATE_CORRUPT" })
+    await assert.rejects(() => store.read("broken"), { code: "TARGET_STATE_CORRUPT" })
     assert.equal((await store.listCorrupt()).length, 1)
   })
 })
 
-test("MissionStore serializes concurrent mutations per session", async () => {
+test("TargetStore serializes concurrent mutations per session", async () => {
   await withStore(async (store) => {
     await store.write("session", { count: 0 })
     await Promise.all(Array.from({ length: 8 }, () => store.mutate("session", (state) => ({ count: state.count + 1 }))))
@@ -47,9 +88,9 @@ test("MissionStore serializes concurrent mutations per session", async () => {
   })
 })
 
-test("MissionStore waits long enough to reclaim a lock that becomes stale", async () => {
+test("TargetStore waits long enough to reclaim a lock that becomes stale", async () => {
   await withStore(async (defaultStore) => {
-    const store = new MissionStore(defaultStore.stateDir, {
+    const store = new TargetStore(defaultStore.stateDir, {
       lockStaleMs: 40,
       lockRetryMs: 10,
       lockRetries: 8,
@@ -64,12 +105,12 @@ test("MissionStore waits long enough to reclaim a lock that becomes stale", asyn
   })
 })
 
-test("MissionStore does not reclaim a lock whose heartbeat advances during stale inspection", async () => {
+test("TargetStore does not reclaim a lock whose heartbeat advances during stale inspection", async () => {
   await withStore(async (defaultStore) => {
     let now = 100
     let statCalls = 0
     let removed = false
-    const store = new MissionStore(defaultStore.stateDir, {
+    const store = new TargetStore(defaultStore.stateDir, {
       lockStaleMs: 50,
       lockRetryMs: 0,
       lockRetries: 1,
@@ -89,11 +130,11 @@ test("MissionStore does not reclaim a lock whose heartbeat advances during stale
   })
 })
 
-test("MissionStore release requires exact lock owner identity", async () => {
+test("TargetStore release requires exact lock owner identity", async () => {
   await withStore(async (defaultStore) => {
     let lockContents = null
     let removed = false
-    const store = new MissionStore(defaultStore.stateDir, {
+    const store = new TargetStore(defaultStore.stateDir, {
       readLockFile: async () => lockContents,
       unlink: async () => { removed = true },
     })
@@ -106,11 +147,11 @@ test("MissionStore release requires exact lock owner identity", async () => {
   })
 })
 
-test("MissionStore does not remove a replacement lock with unchanged mtime", async () => {
+test("TargetStore does not remove a replacement lock with unchanged mtime", async () => {
   await withStore(async (defaultStore) => {
     let reads = 0
     let removed = false
-    const store = new MissionStore(defaultStore.stateDir, {
+    const store = new TargetStore(defaultStore.stateDir, {
       lockStaleMs: 50,
       lockRetryMs: 0,
       lockRetries: 1,

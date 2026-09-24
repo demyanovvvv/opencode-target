@@ -6,10 +6,26 @@ const LOCK_STALE_MS = 15_000
 const LOCK_HEARTBEAT_MS = 5_000
 const LOCK_RETRY_MS = 25
 const LOCK_RETRIES = Math.ceil(LOCK_STALE_MS / LOCK_RETRY_MS) + 2
+const RENAME_RETRY_CODES = new Set(["EPERM", "EACCES", "EBUSY"])
+const RENAME_RETRY_MS = 20
+const RENAME_RETRY_MAX_MS = 200
+const RENAME_RETRIES = 40
 
 function safeName(sessionID) { return Buffer.from(String(sessionID)).toString("base64url") }
 
-export class MissionStore {
+async function renameWithRetry(renameImpl, from, to) {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return await renameImpl(from, to)
+    } catch (error) {
+      if (!RENAME_RETRY_CODES.has(error?.code) || attempt >= RENAME_RETRIES) throw error
+      const backoff = Math.min(RENAME_RETRY_MAX_MS, RENAME_RETRY_MS * (attempt + 1))
+      await new Promise((resolve) => setTimeout(resolve, backoff))
+    }
+  }
+}
+
+export class TargetStore {
   constructor(stateDir, options = {}) {
     this.stateDir = path.resolve(String(stateDir))
     this.lockStaleMs = options.lockStaleMs ?? LOCK_STALE_MS
@@ -19,13 +35,14 @@ export class MissionStore {
     this.now = options.now ?? Date.now
     this.stat = options.stat ?? stat
     this.unlink = options.unlink ?? unlink
+    this.rename = options.rename ?? rename
     this.readLockFile = options.readLockFile ?? readFile
   }
-  path(sessionID) { return path.join(this.stateDir, "missions", `${safeName(sessionID)}.json`) }
+  path(sessionID) { return path.join(this.stateDir, "targets", `${safeName(sessionID)}.json`) }
   lockPath(sessionID) { return path.join(this.stateDir, "locks", `${safeName(sessionID)}.lock`) }
   async ensureDirs() {
     await Promise.all([
-      mkdir(path.join(this.stateDir, "missions"), { recursive: true }),
+      mkdir(path.join(this.stateDir, "targets"), { recursive: true }),
       mkdir(path.join(this.stateDir, "locks"), { recursive: true }),
       mkdir(path.join(this.stateDir, "corrupt"), { recursive: true }),
     ])
@@ -40,9 +57,9 @@ export class MissionStore {
     try { return JSON.parse(raw) } catch (error) {
       await mkdir(path.join(this.stateDir, "corrupt"), { recursive: true })
       const target = path.join(this.stateDir, "corrupt", `${path.basename(file)}.${Date.now()}.${randomUUID()}.corrupt`)
-      await rename(file, target)
-      const diagnostic = new Error(`Mission state is corrupt and was quarantined: ${target}`)
-      diagnostic.code = "MISSION_STATE_CORRUPT"
+      await renameWithRetry(this.rename, file, target)
+      const diagnostic = new Error(`Target state is corrupt and was quarantined: ${target}`)
+      diagnostic.code = "TARGET_STATE_CORRUPT"
       diagnostic.cause = error
       throw diagnostic
     }
@@ -51,7 +68,7 @@ export class MissionStore {
     const file = this.path(sessionID)
     await mkdir(path.join(this.stateDir, "corrupt"), { recursive: true })
     const target = path.join(this.stateDir, "corrupt", `${path.basename(file)}.${Date.now()}.${randomUUID()}.corrupt`)
-    await rename(file, target)
+    await renameWithRetry(this.rename, file, target)
     return target
   }
   async write(sessionID, value) {
@@ -59,7 +76,7 @@ export class MissionStore {
     const file = this.path(sessionID)
     const temp = `${file}.${process.pid}.${randomUUID()}.tmp`
     await writeFile(temp, JSON.stringify(value, null, 2) + "\n", { encoding: "utf8", mode: 0o600 })
-    await rename(temp, file)
+    await renameWithRetry(this.rename, temp, file)
     return value
   }
   async remove(sessionID) { await this.withLock(sessionID, () => rm(this.path(sessionID), { force: true })) }
@@ -107,6 +124,6 @@ export class MissionStore {
         await new Promise((resolve) => setTimeout(resolve, this.lockRetryMs))
       }
     }
-    throw new Error(`Timed out acquiring Mission state lock for session ${sessionID}`)
+    throw new Error(`Timed out acquiring Target state lock for session ${sessionID}`)
   }
 }

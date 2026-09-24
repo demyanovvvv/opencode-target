@@ -1,12 +1,12 @@
 ---
-name: mission-documentation
+name: target-documentation
 description: >-
-  Maintain OpenCode Mission documentation for users, maintainers, and operators. Use when
+  Maintain OpenCode Target documentation for users, maintainers, and operators. Use when
   commands, plugin options, persistence, compatibility, security, release steps, or lifecycle
   semantics change.
 ---
 
-# Mission Documentation
+# Target Documentation
 
 ## Documentation map
 

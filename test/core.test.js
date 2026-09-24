@@ -5,42 +5,42 @@ import path from "node:path"
 import test from "node:test"
 import {
   acquireSchedulerLease,
-  accountMissionUsage,
-  addMissionEvidence,
-  getMissionHistory,
-  missionReport,
-  addMissionCheckpoint,
-  listMissionCheckpoints,
+  accountTargetUsage,
+  addTargetEvidence,
+  getTargetHistory,
+  targetReport,
+  addTargetCheckpoint,
+  listTargetCheckpoints,
   recordVerificationResult,
   cleanupStateDir,
   consumeContinuationDeferral,
-  createMission,
+  createTarget,
   deferNextContinuation,
-  editMission,
+  editTarget,
   extractAssistantUsage,
-  missionPath,
+  targetPath,
   markBudgetWrapupSent,
   markContinuationStarted,
-  parseMissionCommand,
-  pauseMission,
-  readMission,
-  recordMissionTurnOutcome,
+  parseTargetCommand,
+  pauseTarget,
+  readTarget,
+  recordTargetTurnOutcome,
   releaseSchedulerLease,
   renewSchedulerLease,
-  resumeMission,
-  refreshMissionEvidence,
+  resumeTarget,
+  refreshTargetEvidence,
   normalizeRetryPolicy,
   isRetryableVerificationFailure,
-  seedMissionUsageBaselines,
-  setMissionBudget,
+  seedTargetUsageBaselines,
+  setTargetBudget,
   setStoppedStatus,
-  snapshotMission,
+  snapshotTarget,
   sleep,
-  writeMission,
+  writeTarget,
 } from "../src/core.js"
 
 async function withState(fn) {
-  const dir = await mkdtemp(path.join(os.tmpdir(), "opencode-mission-test-"))
+  const dir = await mkdtemp(path.join(os.tmpdir(), "opencode-target-test-"))
   try {
     await fn(dir)
   } finally {
@@ -70,26 +70,26 @@ const successfulTool = (id) => assistant(id, {
   parts: [{ type: "tool", tool: "bash", state: { status: "completed" } }],
 })
 
-test("Mission lifecycle: create, pause, resume, complete, then replace with a fresh mission", async () => {
+test("Target lifecycle: create, pause, resume, complete, then replace with a fresh target", async () => {
   await withState(async (dir) => {
-    const a = await createMission(dir, "s1", "Ship verified auth flow", 10_000)
+    const a = await createTarget(dir, "s1", "Ship verified auth flow", 10_000)
     assert.equal(a.status, "active")
-    assert.ok(a.missionID)
+    assert.ok(a.targetID)
 
-    await assert.rejects(() => createMission(dir, "s1", "Cannot replace unfinished"), /unfinished Mission/)
+    await assert.rejects(() => createTarget(dir, "s1", "Cannot replace unfinished"), /unfinished Target/)
 
-    const paused = await pauseMission(dir, "s1", "user pause", a.missionID)
+    const paused = await pauseTarget(dir, "s1", "user pause", a.targetID)
     assert.equal(paused.status, "paused")
 
-    const resumed = await resumeMission(dir, "s1", a.missionID)
+    const resumed = await resumeTarget(dir, "s1", a.targetID)
     assert.equal(resumed.status, "active")
 
-    const complete = await setStoppedStatus(dir, "s1", "complete", "verified", a.missionID)
+    const complete = await setStoppedStatus(dir, "s1", "complete", "verified", a.targetID)
     assert.equal(complete.status, "complete")
 
-    const b = await createMission(dir, "s1", "Second mission", 5_000)
+    const b = await createTarget(dir, "s1", "Second target", 5_000)
     assert.equal(b.status, "active")
-    assert.notEqual(b.missionID, a.missionID)
+    assert.notEqual(b.targetID, a.targetID)
     assert.equal(b.tokensUsed, 0)
     assert.equal(b.continuationCount, 0)
   })
@@ -97,27 +97,27 @@ test("Mission lifecycle: create, pause, resume, complete, then replace with a fr
 
 test("unknown persisted status is quarantined instead of becoming active", async () => {
   await withState(async (dir) => {
-    const file = missionPath(dir, "corrupt-status")
+    const file = targetPath(dir, "corrupt-status")
     await mkdir(path.dirname(file), { recursive: true })
     await writeFile(file, JSON.stringify({
       version: 3,
       sessionID: "corrupt-status",
-      missionID: "mission-corrupt-status",
+      targetID: "target-corrupt-status",
       objective: "Do not revive invalid state",
       status: "future_status",
     }))
 
     await assert.rejects(
-      () => readMission(dir, "corrupt-status"),
-      (error) => error?.code === "MISSION_STATE_CORRUPT",
+      () => readTarget(dir, "corrupt-status"),
+      (error) => error?.code === "TARGET_STATE_CORRUPT",
     )
-    assert.equal(await readMission(dir, "corrupt-status"), null)
+    assert.equal(await readTarget(dir, "corrupt-status"), null)
   })
 })
 
-test("persisted Mission identity fields are required and quarantined", async () => {
+test("persisted Target identity fields are required and quarantined", async () => {
   await withState(async (dir) => {
-    const file = missionPath(dir, "invalid-identity")
+    const file = targetPath(dir, "invalid-identity")
     await mkdir(path.dirname(file), { recursive: true })
     await writeFile(file, JSON.stringify({
       version: 3,
@@ -127,41 +127,41 @@ test("persisted Mission identity fields are required and quarantined", async () 
     }))
 
     await assert.rejects(
-      () => readMission(dir, "invalid-identity"),
-      (error) => error?.code === "MISSION_STATE_CORRUPT",
+      () => readTarget(dir, "invalid-identity"),
+      (error) => error?.code === "TARGET_STATE_CORRUPT",
     )
-    assert.equal(await readMission(dir, "invalid-identity"), null)
+    assert.equal(await readTarget(dir, "invalid-identity"), null)
   })
 })
 
-test("persisted Mission session identity must match its session file", async () => {
+test("persisted Target session identity must match its session file", async () => {
   await withState(async (dir) => {
-    const file = missionPath(dir, "requested-session")
+    const file = targetPath(dir, "requested-session")
     await mkdir(path.dirname(file), { recursive: true })
     await writeFile(file, JSON.stringify({
       version: 3,
       sessionID: "different-session",
-      missionID: "mission-mismatch",
+      targetID: "target-mismatch",
       objective: "Do not cross session boundaries",
       status: "paused",
     }))
 
     await assert.rejects(
-      () => readMission(dir, "requested-session"),
-      (error) => error?.code === "MISSION_STATE_CORRUPT",
+      () => readTarget(dir, "requested-session"),
+      (error) => error?.code === "TARGET_STATE_CORRUPT",
     )
-    assert.equal(await readMission(dir, "requested-session"), null)
+    assert.equal(await readTarget(dir, "requested-session"), null)
   })
 })
 
 test("persisted schema accepts version 2 but quarantines unknown versions", async () => {
   await withState(async (dir) => {
-    const legacyFile = missionPath(dir, "legacy-v2")
+    const legacyFile = targetPath(dir, "legacy-v2")
     await mkdir(path.dirname(legacyFile), { recursive: true })
     await writeFile(legacyFile, JSON.stringify({
       version: 2,
       sessionID: "legacy-v2",
-      missionID: "mission-legacy-v2",
+      targetID: "target-legacy-v2",
       objective: "Load supported legacy state",
       status: "paused",
       tokenBudget: 500,
@@ -177,112 +177,112 @@ test("persisted schema accepts version 2 but quarantines unknown versions", asyn
       usageByMessage: { "legacy-message": 12 },
       runtime: { noProgressStreak: 1 },
     }))
-    const legacy = await readMission(dir, "legacy-v2")
+    const legacy = await readTarget(dir, "legacy-v2")
     assert.equal(legacy.version, 3)
     assert.equal(legacy.tokenBudget, 500)
     assert.equal(legacy.tokensUsed, 12)
     assert.equal(legacy.continuationCount, 2)
     assert.equal(legacy.usageByMessage["legacy-message"], 12)
 
-    const futureFile = missionPath(dir, "future-v4")
+    const futureFile = targetPath(dir, "future-v4")
     await writeFile(futureFile, JSON.stringify({
       version: 4,
       sessionID: "future-v4",
-      missionID: "mission-future-v4",
+      targetID: "target-future-v4",
       objective: "Do not guess future schema semantics",
       status: "paused",
     }))
     await assert.rejects(
-      () => readMission(dir, "future-v4"),
-      (error) => error?.code === "MISSION_STATE_CORRUPT",
+      () => readTarget(dir, "future-v4"),
+      (error) => error?.code === "TARGET_STATE_CORRUPT",
     )
   })
 })
 
 test("token accounting uses non-cached input + output, excludes plan mode, splits descendant usage, and is idempotent", async () => {
   await withState(async (dir) => {
-    const m = await createMission(dir, "root", "Do work")
+    const m = await createTarget(dir, "root", "Do work")
     const samples = [
       { sessionID: "root", message: assistant("m1", { input: 100, cached: 40, output: 20 }) },
       { sessionID: "root", message: assistant("m2", { input: 999, output: 999, mode: "plan" }) },
       { sessionID: "child", message: assistant("c1", { input: 50, cached: 10, output: 15 }) },
     ]
-    let updated = await accountMissionUsage(dir, "root", samples, { expectedMissionID: m.missionID })
+    let updated = await accountTargetUsage(dir, "root", samples, { expectedTargetID: m.targetID })
     assert.equal(updated.rootTokensUsed, 80)
     assert.equal(updated.descendantTokensUsed, 55)
     assert.equal(updated.tokensUsed, 135)
 
-    updated = await accountMissionUsage(dir, "root", samples, { expectedMissionID: m.missionID })
+    updated = await accountTargetUsage(dir, "root", samples, { expectedTargetID: m.targetID })
     assert.equal(updated.tokensUsed, 135)
 
     // Same assistant message can grow while streaming; only the positive delta is added.
-    updated = await accountMissionUsage(dir, "root", [
+    updated = await accountTargetUsage(dir, "root", [
       { sessionID: "root", message: assistant("m1", { input: 140, cached: 40, output: 30 }) },
-    ], { expectedMissionID: m.missionID })
+    ], { expectedTargetID: m.targetID })
     assert.equal(updated.rootTokensUsed, 130)
     assert.equal(updated.tokensUsed, 185)
   })
 })
 
-test("seeded token baseline excludes pre-Mission usage but charges later delta from the same turn", async () => {
+test("seeded token baseline excludes pre-Target usage but charges later delta from the same turn", async () => {
   await withState(async (dir) => {
     const started = Date.now()
-    const m = await createMission(dir, "s", "Mid-turn Mission")
-    // Simulate an assistant turn that began before Mission creation with 100 billable tokens already spent.
+    const m = await createTarget(dir, "s", "Mid-turn Target")
+    // Simulate an assistant turn that began before Target creation with 100 billable tokens already spent.
     const partial = assistant("mid", { input: 90, cached: 10, output: 20, created: started - 1000 })
-    await seedMissionUsageBaselines(dir, "s", [{ sessionID: "s", message: partial }], { expectedMissionID: m.missionID })
+    await seedTargetUsageBaselines(dir, "s", [{ sessionID: "s", message: partial }], { expectedTargetID: m.targetID })
 
     const completed = assistant("mid", { input: 130, cached: 10, output: 30, created: started - 1000 })
-    const updated = await accountMissionUsage(dir, "s", [{ sessionID: "s", message: completed }], { expectedMissionID: m.missionID })
+    const updated = await accountTargetUsage(dir, "s", [{ sessionID: "s", message: completed }], { expectedTargetID: m.targetID })
     assert.equal(updated.tokensUsed, 50)
   })
 })
 
-test("Mission creation persists its usage baseline atomically", async () => {
+test("Target creation persists its usage baseline atomically", async () => {
   await withState(async (dir) => {
     const partial = assistant("mid", { input: 90, cached: 10, output: 20, created: Date.now() - 1000 })
-    const mission = await createMission(dir, "atomic", "Start with baseline", null, {
+    const target = await createTarget(dir, "atomic", "Start with baseline", null, {
       baselineSamples: [{ sessionID: "atomic", message: partial }],
     })
 
-    assert.equal(mission.tokensUsed, 0)
-    assert.equal(mission.accounting.trackedMessages, 1)
+    assert.equal(target.tokensUsed, 0)
+    assert.equal(target.accounting.trackedMessages, 1)
     const completed = assistant("mid", { input: 130, cached: 10, output: 30, created: Date.now() - 1000 })
-    const updated = await accountMissionUsage(dir, "atomic", [
+    const updated = await accountTargetUsage(dir, "atomic", [
       { sessionID: "atomic", message: completed },
-    ], { expectedMissionID: mission.missionID })
+    ], { expectedTargetID: target.targetID })
     assert.equal(updated.tokensUsed, 50)
   })
 })
 
-test("a pre-Mission turn missing from activation snapshot is baselined on first observation", async () => {
+test("a pre-Target turn missing from activation snapshot is baselined on first observation", async () => {
   await withState(async (dir) => {
-    const mission = await createMission(dir, "late", "Track only post-activation delta")
+    const target = await createTarget(dir, "late", "Track only post-activation delta")
     const first = assistant("late-turn", {
       input: 100,
-      created: mission.createdAtMs - 100,
+      created: target.createdAtMs - 100,
     })
-    first.info.time.completed = mission.createdAtMs + 100
+    first.info.time.completed = target.createdAtMs + 100
 
-    let updated = await accountMissionUsage(dir, "late", [
+    let updated = await accountTargetUsage(dir, "late", [
       { sessionID: "late", message: first },
-    ], { expectedMissionID: mission.missionID })
+    ], { expectedTargetID: target.targetID })
     assert.equal(updated.tokensUsed, 0)
     assert.equal(updated.usageByMessage["late:late-turn"], 100)
 
     const later = assistant("late-turn", {
       input: 130,
-      created: mission.createdAtMs - 100,
+      created: target.createdAtMs - 100,
     })
-    later.info.time.completed = mission.createdAtMs + 200
-    updated = await accountMissionUsage(dir, "late", [
+    later.info.time.completed = target.createdAtMs + 200
+    updated = await accountTargetUsage(dir, "late", [
       { sessionID: "late", message: later },
-    ], { expectedMissionID: mission.missionID })
+    ], { expectedTargetID: target.targetID })
     assert.equal(updated.tokensUsed, 30)
   })
 })
 
-test("Mission creation rejects a baseline larger than the durable watermark capacity", async () => {
+test("Target creation rejects a baseline larger than the durable watermark capacity", async () => {
   await withState(async (dir) => {
     const baselineSamples = Array.from({ length: 12_001 }, (_, index) => ({
       sessionID: "oversized",
@@ -290,10 +290,10 @@ test("Mission creation rejects a baseline larger than the durable watermark capa
     }))
 
     await assert.rejects(
-      createMission(dir, "oversized", "Cannot safely truncate baseline", null, { baselineSamples }),
-      (error) => error.code === "MISSION_BASELINE_TOO_LARGE",
+      createTarget(dir, "oversized", "Cannot safely truncate baseline", null, { baselineSamples }),
+      (error) => error.code === "TARGET_BASELINE_TOO_LARGE",
     )
-    assert.equal(await readMission(dir, "oversized"), null)
+    assert.equal(await readTarget(dir, "oversized"), null)
   })
 })
 
@@ -304,13 +304,13 @@ test("extractAssistantUsage clamps cached input and excludes plan mode", () => {
 
 test("active wall-clock accounting advances and persists its baseline", async () => {
   await withState(async (dir) => {
-    const m = await createMission(dir, "clock", "Track active time")
+    const m = await createTarget(dir, "clock", "Track active time")
     await sleep(12)
-    const accounted = await accountMissionUsage(dir, "clock", [], { expectedMissionID: m.missionID })
+    const accounted = await accountTargetUsage(dir, "clock", [], { expectedTargetID: m.targetID })
     assert.ok(accounted.accumulatedActiveMs >= 5)
     const baseline = accounted.activeStartedAtMs
     await sleep(8)
-    const accountedAgain = await accountMissionUsage(dir, "clock", [], { expectedMissionID: m.missionID })
+    const accountedAgain = await accountTargetUsage(dir, "clock", [], { expectedTargetID: m.targetID })
     assert.ok(accountedAgain.accumulatedActiveMs >= accounted.accumulatedActiveMs)
     assert.ok(accountedAgain.activeStartedAtMs >= baseline)
   })
@@ -318,98 +318,98 @@ test("active wall-clock accounting advances and persists its baseline", async ()
 
 test("budget crossing is enforced by runtime and budget_limited takes precedence", async () => {
   await withState(async (dir) => {
-    const m = await createMission(dir, "s", "Budgeted task", 100)
-    let updated = await accountMissionUsage(dir, "s", [
+    const m = await createTarget(dir, "s", "Budgeted task", 100)
+    let updated = await accountTargetUsage(dir, "s", [
       { sessionID: "s", message: assistant("a", { input: 80, cached: 10, output: 30 }) },
-    ], { expectedMissionID: m.missionID })
+    ], { expectedTargetID: m.targetID })
     assert.equal(updated.tokensUsed, 100)
     assert.equal(updated.status, "budget_limited")
 
-    updated = await pauseMission(dir, "s", "try pause", m.missionID)
+    updated = await pauseTarget(dir, "s", "try pause", m.targetID)
     assert.equal(updated.status, "budget_limited")
 
-    updated = await resumeMission(dir, "s", m.missionID)
+    updated = await resumeTarget(dir, "s", m.targetID)
     assert.equal(updated.status, "budget_limited")
 
-    updated = await setMissionBudget(dir, "s", 200, { expectedMissionID: m.missionID })
+    updated = await setTargetBudget(dir, "s", 200, { expectedTargetID: m.targetID })
     assert.equal(updated.status, "budget_limited", "budget edit does not itself resume")
 
-    updated = await resumeMission(dir, "s", m.missionID)
+    updated = await resumeTarget(dir, "s", m.targetID)
     assert.equal(updated.status, "active")
   })
 })
 
 test("usage_limited may supersede budget_limited, while paused/blocked may not", async () => {
   await withState(async (dir) => {
-    const m = await createMission(dir, "u", "Usage priority", 10)
-    let state = await accountMissionUsage(dir, "u", [
+    const m = await createTarget(dir, "u", "Usage priority", 10)
+    let state = await accountTargetUsage(dir, "u", [
       { sessionID: "u", message: assistant("u1", { input: 10, output: 1 }) },
-    ], { expectedMissionID: m.missionID })
+    ], { expectedTargetID: m.targetID })
     assert.equal(state.status, "budget_limited")
-    state = await setStoppedStatus(dir, "u", "blocked", "runtime", m.missionID)
+    state = await setStoppedStatus(dir, "u", "blocked", "runtime", m.targetID)
     assert.equal(state.status, "budget_limited")
-    state = await setStoppedStatus(dir, "u", "usage_limited", "provider quota", m.missionID)
+    state = await setStoppedStatus(dir, "u", "usage_limited", "provider quota", m.targetID)
     assert.equal(state.status, "usage_limited")
   })
 })
 
-test("stale expected mission ID cannot mutate a replacement Mission", async () => {
+test("stale expected target ID cannot mutate a replacement Target", async () => {
   await withState(async (dir) => {
-    const old = await createMission(dir, "s", "Old")
-    await setStoppedStatus(dir, "s", "complete", "done", old.missionID)
-    const current = await createMission(dir, "s", "New")
+    const old = await createTarget(dir, "s", "Old")
+    await setStoppedStatus(dir, "s", "complete", "done", old.targetID)
+    const current = await createTarget(dir, "s", "New")
 
-    const stale = await accountMissionUsage(dir, "s", [
+    const stale = await accountTargetUsage(dir, "s", [
       { sessionID: "s", message: assistant("late", { input: 100, output: 50 }) },
-    ], { expectedMissionID: old.missionID })
+    ], { expectedTargetID: old.targetID })
     assert.equal(stale, null)
 
-    const persisted = await readMission(dir, "s")
-    assert.equal(persisted.missionID, current.missionID)
+    const persisted = await readTarget(dir, "s")
+    assert.equal(persisted.targetID, current.targetID)
     assert.equal(persisted.tokensUsed, 0)
   })
 })
 
-test("failed-exec circuit breaker blocks after three qualifying Mission turns and success resets it", async () => {
+test("failed-exec circuit breaker blocks after three qualifying Target turns and success resets it", async () => {
   await withState(async (dir) => {
-    const m = await createMission(dir, "s", "Fix failures")
-    let state = await recordMissionTurnOutcome(dir, "s", failedExec("a1"), { expectedMissionID: m.missionID })
+    const m = await createTarget(dir, "s", "Fix failures")
+    let state = await recordTargetTurnOutcome(dir, "s", failedExec("a1"), { expectedTargetID: m.targetID })
     assert.equal(state.runtime.failedExecStreak, 1)
-    state = await recordMissionTurnOutcome(dir, "s", failedExec("a2"), { expectedMissionID: m.missionID })
+    state = await recordTargetTurnOutcome(dir, "s", failedExec("a2"), { expectedTargetID: m.targetID })
     assert.equal(state.runtime.failedExecStreak, 2)
-    state = await recordMissionTurnOutcome(dir, "s", successfulTool("ok"), { expectedMissionID: m.missionID })
+    state = await recordTargetTurnOutcome(dir, "s", successfulTool("ok"), { expectedTargetID: m.targetID })
     assert.equal(state.runtime.failedExecStreak, 0)
-    state = await recordMissionTurnOutcome(dir, "s", failedExec("a3"), { expectedMissionID: m.missionID })
-    state = await recordMissionTurnOutcome(dir, "s", failedExec("a4"), { expectedMissionID: m.missionID })
-    state = await recordMissionTurnOutcome(dir, "s", failedExec("a5"), { expectedMissionID: m.missionID })
+    state = await recordTargetTurnOutcome(dir, "s", failedExec("a3"), { expectedTargetID: m.targetID })
+    state = await recordTargetTurnOutcome(dir, "s", failedExec("a4"), { expectedTargetID: m.targetID })
+    state = await recordTargetTurnOutcome(dir, "s", failedExec("a5"), { expectedTargetID: m.targetID })
     assert.equal(state.status, "blocked")
-    assert.match(state.stopReason, /3 consecutive Mission turns/)
+    assert.match(state.stopReason, /3 consecutive Target turns/)
   })
 })
 
 test("turn-outcome accounting is idempotent for the same assistant message", async () => {
   await withState(async (dir) => {
-    const m = await createMission(dir, "s", "No double count")
+    const m = await createTarget(dir, "s", "No double count")
     const msg = failedExec("dup")
-    let state = await recordMissionTurnOutcome(dir, "s", msg, { expectedMissionID: m.missionID })
+    let state = await recordTargetTurnOutcome(dir, "s", msg, { expectedTargetID: m.targetID })
     assert.equal(state.runtime.failedExecStreak, 1)
-    state = await recordMissionTurnOutcome(dir, "s", msg, { expectedMissionID: m.missionID })
+    state = await recordTargetTurnOutcome(dir, "s", msg, { expectedTargetID: m.targetID })
     assert.equal(state.runtime.failedExecStreak, 1)
   })
 })
 
 test("empty automatic continuation circuit breaker ignores ordinary turns and blocks after three empty auto turns", async () => {
   await withState(async (dir) => {
-    const m = await createMission(dir, "s", "Keep going")
-    let state = await recordMissionTurnOutcome(dir, "s", assistant("ordinary", { parts: [] }), {
-      expectedMissionID: m.missionID,
+    const m = await createTarget(dir, "s", "Keep going")
+    let state = await recordTargetTurnOutcome(dir, "s", assistant("ordinary", { parts: [] }), {
+      expectedTargetID: m.targetID,
       automatic: false,
     })
     assert.equal(state.runtime.emptyAutomaticStreak, 0)
 
     for (let i = 1; i <= 3; i++) {
-      state = await recordMissionTurnOutcome(dir, "s", assistant(`auto-${i}`, { parts: [] }), {
-        expectedMissionID: m.missionID,
+      state = await recordTargetTurnOutcome(dir, "s", assistant(`auto-${i}`, { parts: [] }), {
+        expectedTargetID: m.targetID,
         automatic: true,
       })
     }
@@ -420,10 +420,10 @@ test("empty automatic continuation circuit breaker ignores ordinary turns and bl
 
 test("resume resets circuit-breaker audit", async () => {
   await withState(async (dir) => {
-    const m = await createMission(dir, "s", "Retry")
-    await recordMissionTurnOutcome(dir, "s", failedExec("a1"), { expectedMissionID: m.missionID })
-    await setStoppedStatus(dir, "s", "blocked", "blocked", m.missionID)
-    const resumed = await resumeMission(dir, "s", m.missionID)
+    const m = await createTarget(dir, "s", "Retry")
+    await recordTargetTurnOutcome(dir, "s", failedExec("a1"), { expectedTargetID: m.targetID })
+    await setStoppedStatus(dir, "s", "blocked", "blocked", m.targetID)
+    const resumed = await resumeTarget(dir, "s", m.targetID)
     assert.equal(resumed.status, "active")
     assert.equal(resumed.runtime.failedExecStreak, 0)
     assert.equal(resumed.runtime.emptyAutomaticStreak, 0)
@@ -432,63 +432,63 @@ test("resume resets circuit-breaker audit", async () => {
 
 test("proven completion can supersede budget_limited", async () => {
   await withState(async (dir) => {
-    const m = await createMission(dir, "s", "Finish exactly", 10)
-    const limited = await accountMissionUsage(dir, "s", [
+    const m = await createTarget(dir, "s", "Finish exactly", 10)
+    const limited = await accountTargetUsage(dir, "s", [
       { sessionID: "s", message: assistant("budget-cross", { input: 20 }) },
-    ], { expectedMissionID: m.missionID })
+    ], { expectedTargetID: m.targetID })
     assert.equal(limited.status, "budget_limited")
 
-    const completed = await setStoppedStatus(dir, "s", "complete", "Verified against every requirement", m.missionID)
+    const completed = await setStoppedStatus(dir, "s", "complete", "Verified against every requirement", m.targetID)
     assert.equal(completed.status, "complete")
   })
 })
 
-test("continuation deferral is deterministic and mission-id guarded", async () => {
+test("continuation deferral is deterministic and target-id guarded", async () => {
   await withState(async (dir) => {
-    const m = await createMission(dir, "s", "Control plane")
-    await deferNextContinuation(dir, "s", 2, m.missionID)
-    assert.equal(await consumeContinuationDeferral(dir, "s", m.missionID), true)
-    assert.equal(await consumeContinuationDeferral(dir, "s", m.missionID), true)
-    assert.equal(await consumeContinuationDeferral(dir, "s", m.missionID), false)
+    const m = await createTarget(dir, "s", "Control plane")
+    await deferNextContinuation(dir, "s", 2, m.targetID)
+    assert.equal(await consumeContinuationDeferral(dir, "s", m.targetID), true)
+    assert.equal(await consumeContinuationDeferral(dir, "s", m.targetID), true)
+    assert.equal(await consumeContinuationDeferral(dir, "s", m.targetID), false)
     assert.equal(await consumeContinuationDeferral(dir, "s", "stale-id"), false)
   })
 })
 
-test("command parser supports /mission, alias payloads, budget and controls", () => {
-  assert.deepEqual(parseMissionCommand(""), { op: "view" })
-  assert.deepEqual(parseMissionCommand("Ship it"), { op: "set", objective: "Ship it", tokenBudget: null })
-  assert.deepEqual(parseMissionCommand("--budget 12000 Ship it"), { op: "set", objective: "Ship it", tokenBudget: 12000 })
-  assert.deepEqual(parseMissionCommand("pause waiting for user"), { op: "pause", reason: "waiting for user" })
-  assert.deepEqual(parseMissionCommand("doctor"), { op: "doctor" })
-  assert.deepEqual(parseMissionCommand("verify unit"), { op: "verify", verificationID: "unit" })
-  assert.deepEqual(parseMissionCommand("history"), { op: "history" })
-  assert.deepEqual(parseMissionCommand("explain"), { op: "explain" })
-  assert.deepEqual(parseMissionCommand("report"), { op: "report" })
-  assert.deepEqual(parseMissionCommand("checkpoint before tests"), { op: "checkpoint", summary: "before tests" })
-  assert.deepEqual(parseMissionCommand("budget off"), { op: "budget", tokenBudget: null })
-  assert.deepEqual(parseMissionCommand("edit New objective"), { op: "edit", objective: "New objective" })
+test("command parser supports /target, alias payloads, budget and controls", () => {
+  assert.deepEqual(parseTargetCommand(""), { op: "view" })
+  assert.deepEqual(parseTargetCommand("Ship it"), { op: "set", objective: "Ship it", tokenBudget: null })
+  assert.deepEqual(parseTargetCommand("--budget 12000 Ship it"), { op: "set", objective: "Ship it", tokenBudget: 12000 })
+  assert.deepEqual(parseTargetCommand("pause waiting for user"), { op: "pause", reason: "waiting for user" })
+  assert.deepEqual(parseTargetCommand("doctor"), { op: "doctor" })
+  assert.deepEqual(parseTargetCommand("verify unit"), { op: "verify", verificationID: "unit" })
+  assert.deepEqual(parseTargetCommand("history"), { op: "history" })
+  assert.deepEqual(parseTargetCommand("explain"), { op: "explain" })
+  assert.deepEqual(parseTargetCommand("report"), { op: "report" })
+  assert.deepEqual(parseTargetCommand("checkpoint before tests"), { op: "checkpoint", summary: "before tests" })
+  assert.deepEqual(parseTargetCommand("budget off"), { op: "budget", tokenBudget: null })
+  assert.deepEqual(parseTargetCommand("edit New objective"), { op: "edit", objective: "New objective" })
 })
 
 test("snapshot exposes remaining budget and root/descendant split", async () => {
   await withState(async (dir) => {
-    const m = await createMission(dir, "s", "Snapshot", 1000)
-    const updated = await accountMissionUsage(dir, "s", [
+    const m = await createTarget(dir, "s", "Snapshot", 1000)
+    const updated = await accountTargetUsage(dir, "s", [
       { sessionID: "s", message: assistant("r", { input: 100, cached: 20, output: 10 }) },
       { sessionID: "c", message: assistant("c", { input: 50, output: 10 }) },
-    ], { expectedMissionID: m.missionID })
-    const view = snapshotMission(updated)
-    assert.equal(view.mission.rootTokensUsed, 90)
-    assert.equal(view.mission.descendantTokensUsed, 60)
+    ], { expectedTargetID: m.targetID })
+    const view = snapshotTarget(updated)
+    assert.equal(view.target.rootTokensUsed, 90)
+    assert.equal(view.target.descendantTokensUsed, 60)
     assert.equal(view.remainingTokens, 850)
   })
 })
 
 test("corrupt persisted state is quarantined instead of being treated as absent", async () => {
   await withState(async (dir) => {
-    const file = missionPath(dir, "s")
+    const file = targetPath(dir, "s")
     await mkdir(path.dirname(file), { recursive: true })
     await writeFile(file, "{not-json", "utf8")
-    await assert.rejects(() => readMission(dir, "s"), /corrupt|invalid/i)
+    await assert.rejects(() => readTarget(dir, "s"), /corrupt|invalid/i)
     const quarantined = await readdir(path.join(dir, "corrupt"))
     assert.equal(quarantined.length, 1)
     assert.match(quarantined[0], /cw\.json\./)
@@ -497,27 +497,27 @@ test("corrupt persisted state is quarantined instead of being treated as absent"
 
 test("schema-invalid persisted state is quarantined", async () => {
   await withState(async (dir) => {
-    const file = missionPath(dir, "s")
+    const file = targetPath(dir, "s")
     await mkdir(path.dirname(file), { recursive: true })
     await writeFile(file, JSON.stringify({ sessionID: "s", objective: "" }), "utf8")
-    await assert.rejects(() => readMission(dir, "s"), { code: "MISSION_STATE_CORRUPT" })
+    await assert.rejects(() => readTarget(dir, "s"), { code: "TARGET_STATE_CORRUPT" })
     assert.equal((await readdir(path.join(dir, "corrupt"))).length, 1)
   })
 })
 
 test("scheduler lease has exclusive ownership and may be recovered after expiry", async () => {
   await withState(async (dir) => {
-    const mission = await createMission(dir, "s", "Lease guarded continuation")
+    const target = await createTarget(dir, "s", "Lease guarded continuation")
     const first = await acquireSchedulerLease(dir, "s", "owner-a", {
-      expectedMissionID: mission.missionID,
+      expectedTargetID: target.targetID,
       leaseMs: 1000,
       at: 10_000,
     })
     assert.equal(first.acquired, true)
-    assert.equal(first.mission.schedulerLease.owner, "owner-a")
+    assert.equal(first.target.schedulerLease.owner, "owner-a")
 
     const denied = await acquireSchedulerLease(dir, "s", "owner-b", {
-      expectedMissionID: mission.missionID,
+      expectedTargetID: target.targetID,
       leaseMs: 1000,
       at: 10_500,
     })
@@ -525,102 +525,102 @@ test("scheduler lease has exclusive ownership and may be recovered after expiry"
     assert.equal(denied.leaseExpiresAtMs, 11_000)
 
     assert.equal(await renewSchedulerLease(dir, "s", "owner-b", {
-      expectedMissionID: mission.missionID,
+      expectedTargetID: target.targetID,
       leaseMs: 1000,
       at: 10_600,
     }), null)
     const renewed = await renewSchedulerLease(dir, "s", "owner-a", {
-      expectedMissionID: mission.missionID,
+      expectedTargetID: target.targetID,
       leaseMs: 1000,
       at: 10_600,
     })
     assert.equal(renewed.schedulerLease.expiresAtMs, 11_600)
 
     const recovered = await acquireSchedulerLease(dir, "s", "owner-b", {
-      expectedMissionID: mission.missionID,
+      expectedTargetID: target.targetID,
       leaseMs: 1000,
       at: 11_601,
     })
     assert.equal(recovered.acquired, true)
-    assert.equal(recovered.mission.schedulerLease.owner, "owner-b")
-    assert.equal(await releaseSchedulerLease(dir, "s", "owner-a", mission.missionID), null)
-    const released = await releaseSchedulerLease(dir, "s", "owner-b", mission.missionID)
+    assert.equal(recovered.target.schedulerLease.owner, "owner-b")
+    assert.equal(await releaseSchedulerLease(dir, "s", "owner-a", target.targetID), null)
+    const released = await releaseSchedulerLease(dir, "s", "owner-b", target.targetID)
     assert.equal(released.schedulerLease, null)
   })
 })
 
 test("an expired scheduler lease cannot be revived by renewal", async () => {
   await withState(async (dir) => {
-    const mission = await createMission(dir, "expired-renewal", "Fence expired owner")
+    const target = await createTarget(dir, "expired-renewal", "Fence expired owner")
     const acquired = await acquireSchedulerLease(dir, "expired-renewal", "owner-a", {
-      expectedMissionID: mission.missionID,
+      expectedTargetID: target.targetID,
       leaseMs: 1_000,
       at: 10_000,
     })
     assert.equal(acquired.acquired, true)
     assert.equal(await renewSchedulerLease(dir, "expired-renewal", "owner-a", {
-      expectedMissionID: mission.missionID,
+      expectedTargetID: target.targetID,
       leaseMs: 1_000,
       at: 11_001,
     }), null)
     assert.equal((await acquireSchedulerLease(dir, "expired-renewal", "owner-b", {
-      expectedMissionID: mission.missionID,
+      expectedTargetID: target.targetID,
       leaseMs: 1_000,
       at: 11_001,
     })).acquired, true)
   })
 })
 
-test("scheduler lease cannot mutate a replacement or stopped Mission", async () => {
+test("scheduler lease cannot mutate a replacement or stopped Target", async () => {
   await withState(async (dir) => {
-    const old = await createMission(dir, "s", "Old")
-    await setStoppedStatus(dir, "s", "complete", "done", old.missionID)
-    const replacement = await createMission(dir, "s", "Replacement")
+    const old = await createTarget(dir, "s", "Old")
+    await setStoppedStatus(dir, "s", "complete", "done", old.targetID)
+    const replacement = await createTarget(dir, "s", "Replacement")
     assert.equal(await acquireSchedulerLease(dir, "s", "old-owner", {
-      expectedMissionID: old.missionID,
+      expectedTargetID: old.targetID,
     }), null)
-    await setStoppedStatus(dir, "s", "paused", "user pause", replacement.missionID)
+    await setStoppedStatus(dir, "s", "paused", "user pause", replacement.targetID)
     assert.equal(await acquireSchedulerLease(dir, "s", "new-owner", {
-      expectedMissionID: replacement.missionID,
+      expectedTargetID: replacement.targetID,
     }), null)
   })
 })
 
 test("scheduler lease permits one idempotent budget wrap-up", async () => {
   await withState(async (dir) => {
-    const mission = await createMission(dir, "s", "Budget", 10)
-    await accountMissionUsage(dir, "s", [
+    const target = await createTarget(dir, "s", "Budget", 10)
+    await accountTargetUsage(dir, "s", [
       { sessionID: "s", message: assistant("over", { input: 10, output: 1 }) },
-    ], { expectedMissionID: mission.missionID })
+    ], { expectedTargetID: target.targetID })
     const lease = await acquireSchedulerLease(dir, "s", "wrap-owner", {
-      expectedMissionID: mission.missionID,
+      expectedTargetID: target.targetID,
     })
     assert.equal(lease.acquired, true)
-    assert.ok(await markBudgetWrapupSent(dir, "s", mission.missionID))
-    assert.equal(await markBudgetWrapupSent(dir, "s", mission.missionID), null)
+    assert.ok(await markBudgetWrapupSent(dir, "s", target.targetID))
+    assert.equal(await markBudgetWrapupSent(dir, "s", target.targetID), null)
     assert.equal(await acquireSchedulerLease(dir, "s", "other-owner", {
-      expectedMissionID: mission.missionID,
+      expectedTargetID: target.targetID,
     }), null)
   })
 })
 
-test("runtime limits stop a Mission by automatic turns and no-progress turns", async () => {
+test("runtime limits stop a Target by automatic turns and no-progress turns", async () => {
   await withState(async (dir) => {
-    const mission = await createMission(dir, "s", "Limited", null, {
+    const target = await createTarget(dir, "s", "Limited", null, {
       maxAutomaticTurns: 2,
       maxNoProgressTurns: 2,
     })
-    const first = await markContinuationStarted(dir, "s", mission.missionID)
-    await recordMissionTurnOutcome(dir, "s", assistant("a", { parts: [] }), {
-      expectedMissionID: mission.missionID,
+    const first = await markContinuationStarted(dir, "s", target.targetID)
+    await recordTargetTurnOutcome(dir, "s", assistant("a", { parts: [] }), {
+      expectedTargetID: target.targetID,
       automatic: true,
     })
-    const second = await markContinuationStarted(dir, "s", mission.missionID)
-    await recordMissionTurnOutcome(dir, "s", assistant("b", { parts: [] }), {
-      expectedMissionID: mission.missionID,
+    const second = await markContinuationStarted(dir, "s", target.targetID)
+    await recordTargetTurnOutcome(dir, "s", assistant("b", { parts: [] }), {
+      expectedTargetID: target.targetID,
       automatic: true,
     })
-    const final = await readMission(dir, "s")
+    const final = await readTarget(dir, "s")
     assert.equal(first.continuationCount, 1)
     assert.equal(second.continuationCount, 2)
     assert.equal(final.status, "usage_limited")
@@ -628,13 +628,13 @@ test("runtime limits stop a Mission by automatic turns and no-progress turns", a
   })
 })
 
-test("active time limit is enforced when accounting a Mission", async () => {
+test("active time limit is enforced when accounting a Target", async () => {
   await withState(async (dir) => {
-    const mission = await createMission(dir, "s", "Timed", null, { maxActiveSeconds: 1 })
-    const state = await readMission(dir, "s")
+    const target = await createTarget(dir, "s", "Timed", null, { maxActiveSeconds: 1 })
+    const state = await readTarget(dir, "s")
     state.accumulatedActiveMs = 2_000
-    await writeMission(dir, state)
-    const updated = await accountMissionUsage(dir, "s", [], { expectedMissionID: mission.missionID })
+    await writeTarget(dir, state)
+    const updated = await accountTargetUsage(dir, "s", [], { expectedTargetID: target.targetID })
     assert.equal(updated.status, "usage_limited")
     assert.match(updated.stopReason, /active time limit/i)
   })
@@ -642,30 +642,30 @@ test("active time limit is enforced when accounting a Mission", async () => {
 
 test("completion requires evidence for every declared requirement", async () => {
   await withState(async (dir) => {
-    const mission = await createMission(dir, "s", "Verified", null, {
+    const target = await createTarget(dir, "s", "Verified", null, {
       requirements: [
         { id: "tests", text: "Tests pass" },
         { id: "docs", text: "Documentation is updated" },
       ],
     })
     await assert.rejects(
-      () => setStoppedStatus(dir, "s", "complete", "done", mission.missionID),
+      () => setStoppedStatus(dir, "s", "complete", "done", target.targetID),
       /requirements|evidence/i,
     )
-    const withTests = await addMissionEvidence(dir, "s", "tests", {
+    const withTests = await addTargetEvidence(dir, "s", "tests", {
       kind: "command",
       summary: "npm test: 10 passed",
-    }, mission.missionID)
+    }, target.targetID)
     assert.equal(withTests.requirements[0].status, "verified")
     await assert.rejects(
-      () => setStoppedStatus(dir, "s", "complete", "done", mission.missionID),
+      () => setStoppedStatus(dir, "s", "complete", "done", target.targetID),
       /requirements|evidence/i,
     )
-    await addMissionEvidence(dir, "s", "docs", {
+    await addTargetEvidence(dir, "s", "docs", {
       kind: "inspection",
       summary: "README reviewed",
-    }, mission.missionID)
-    const complete = await setStoppedStatus(dir, "s", "complete", "done", mission.missionID)
+    }, target.targetID)
+    const complete = await setStoppedStatus(dir, "s", "complete", "done", target.targetID)
     assert.equal(complete.status, "complete")
     assert.equal(complete.requirements.every((requirement) => requirement.status === "verified"), true)
   })
@@ -673,11 +673,11 @@ test("completion requires evidence for every declared requirement", async () => 
 
 test("configured verification gates are persisted and record pass/fail evidence", async () => {
   await withState(async (dir) => {
-    const mission = await createMission(dir, "s", "Verify", null, {
+    const target = await createTarget(dir, "s", "Verify", null, {
       requirements: [{ id: "tests", text: "Tests pass" }],
       verification: [{ id: "unit", command: "npm test", requirementID: "tests" }],
     })
-    assert.deepEqual(mission.verification, [{
+    assert.deepEqual(target.verification, [{
       id: "unit",
       command: "npm test",
       requirementID: "tests",
@@ -687,43 +687,46 @@ test("configured verification gates are persisted and record pass/fail evidence"
       passed: false,
       summary: "npm test: 1 failed",
       attempts: 2,
-    }, mission.missionID)
+      errorKind: "exit_code",
+    }, target.targetID)
     assert.equal(failed.requirements[0].status, "open")
-    assert.equal((await getMissionHistory(dir, "s")).at(-1).details.attempts, 2)
+    assert.equal((await getTargetHistory(dir, "s")).at(-1).details.attempts, 2)
+    assert.equal((await getTargetHistory(dir, "s")).at(-1).details.errorKind, "exit_code")
+    assert.equal(failed.requirements[0].evidence.at(-1).errorKind, "exit_code")
     const passed = await recordVerificationResult(dir, "s", "unit", {
       passed: true,
       summary: "npm test: all passed",
-    }, mission.missionID)
+    }, target.targetID)
     assert.equal(passed.requirements[0].status, "verified")
   })
 })
 
 test("verification evidence becomes stale after the worktree fingerprint changes", async () => {
   await withState(async (dir) => {
-    const mission = await createMission(dir, "s", "Fresh evidence", null, {
+    const target = await createTarget(dir, "s", "Fresh evidence", null, {
       requirements: [{ id: "tests", text: "Tests pass" }],
     })
-    await addMissionEvidence(dir, "s", "tests", {
+    await addTargetEvidence(dir, "s", "tests", {
       kind: "command",
       summary: "passed",
       fingerprint: "tree-a",
-    }, mission.missionID)
-    let current = await readMission(dir, "s")
+    }, target.targetID)
+    let current = await readTarget(dir, "s")
     assert.equal(current.requirements[0].status, "verified")
-    current = await refreshMissionEvidence(dir, "s", "tree-b", mission.missionID)
+    current = await refreshTargetEvidence(dir, "s", "tree-b", target.targetID)
     assert.equal(current.requirements[0].status, "open")
     assert.equal(current.requirements[0].evidence.at(-1).stale, true)
   })
 })
 
-test("Mission journal and report explain lifecycle and missing requirements", async () => {
+test("Target journal and report explain lifecycle and missing requirements", async () => {
   await withState(async (dir) => {
-    const mission = await createMission(dir, "s", "Report", null, {
+    const target = await createTarget(dir, "s", "Report", null, {
       requirements: [{ id: "tests", text: "Tests pass" }],
     })
-    const history = await getMissionHistory(dir, "s")
+    const history = await getTargetHistory(dir, "s")
     assert.ok(history.some((event) => event.type === "created"))
-    const report = await missionReport(dir, "s")
+    const report = await targetReport(dir, "s")
     assert.equal(report.status, "active")
     assert.deepEqual(report.missingRequirements, ["tests"])
     assert.ok(report.historyLength >= 1)
@@ -735,15 +738,15 @@ test("Mission journal and report explain lifecycle and missing requirements", as
 
 test("manual checkpoints persist bounded metadata without changing lifecycle", async () => {
   await withState(async (dir) => {
-    const mission = await createMission(dir, "s", "Checkpoint")
-    const checkpoint = await addMissionCheckpoint(dir, "s", {
+    const target = await createTarget(dir, "s", "Checkpoint")
+    const checkpoint = await addTargetCheckpoint(dir, "s", {
       fingerprint: "tree-a",
       commit: "abc123",
       summary: "Before refactor",
-    }, mission.missionID)
+    }, target.targetID)
     assert.equal(checkpoint.status, "active")
     assert.equal(checkpoint.checkpoints[0].fingerprint, "tree-a")
-    assert.equal((await listMissionCheckpoints(dir, "s")).length, 1)
+    assert.equal((await listTargetCheckpoints(dir, "s")).length, 1)
   })
 })
 

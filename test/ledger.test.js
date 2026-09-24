@@ -30,7 +30,7 @@ test("UsageLedger exposes completeness when traversal is capped", () => {
   assert.equal(ledger.completeness().truncated, true)
 })
 
-test("late-discovered pre-Mission messages establish a zero-charge baseline then accrue deltas", () => {
+test("late-discovered pre-Target messages establish a zero-charge baseline then accrue deltas", () => {
   const ledger = new UsageLedger({ createdAtMs: 1000, rootSessionID: "root" })
 
   assert.deepEqual(ledger.record([
@@ -43,7 +43,7 @@ test("late-discovered pre-Mission messages establish a zero-charge baseline then
   ]), { rootDelta: 40, descendantDelta: 0, totalDelta: 40 })
 })
 
-test("messages first observed after Mission creation are charged normally", () => {
+test("messages first observed after Target creation are charged normally", () => {
   const ledger = new UsageLedger({ createdAtMs: 1000, rootSessionID: "root" })
   assert.equal(ledger.record([
     { sessionID: "root", message: timedAssistant("new", 25, 1001, 1100) },

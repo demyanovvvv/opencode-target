@@ -2,10 +2,10 @@ import assert from "node:assert/strict"
 import { mkdtemp, rm } from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
-import { MissionPlugin } from "../src/server.js"
-import { createMission, readMission } from "../src/core.js"
+import { TargetPlugin } from "../src/server.js"
+import { createTarget, readTarget } from "../src/core.js"
 
-const stateDir = await mkdtemp(path.join(os.tmpdir(), "mission-server-smoke-"))
+const stateDir = await mkdtemp(path.join(os.tmpdir(), "target-server-smoke-"))
 const messages = new Map()
 const children = new Map()
 const shell = () => Promise.resolve({ exitCode: 0, stdout: "all checks passed", stderr: "" })
@@ -31,36 +31,36 @@ const client = {
 
 try {
   await assert.rejects(
-    () => MissionPlugin({ client }, { state_dir: stateDir, min_continue_interval_ms: "soon" }),
+    () => TargetPlugin({ client }, { state_dir: stateDir, min_continue_interval_ms: "soon" }),
     /min_continue_interval_ms/,
   )
 
-  const hooks = await MissionPlugin({ client, $, directory: process.cwd() }, {
+  const hooks = await TargetPlugin({ client, $, directory: process.cwd() }, {
     state_dir: stateDir,
     auto_continue: false,
-    max_mission_token_budget: 1000,
+    max_target_token_budget: 1000,
     verification: [{ id: "unit", command: "npm test", requirementID: "tests" }],
   })
   const config = {}
   await hooks.config(config)
-  assert.ok(config.command.mission)
-  assert.ok(config.command.msn)
-  assert.ok(hooks.tool.get_mission)
-  assert.ok(hooks.tool.create_mission)
-  assert.ok(hooks.tool.update_mission)
-  assert.ok(hooks.tool.add_mission_evidence)
-  assert.ok(hooks.tool.verify_mission_gate)
-  assert.ok(hooks.tool.create_mission_checkpoint)
+  assert.ok(config.command.target)
+  assert.ok(config.command.t)
+  assert.ok(hooks.tool.get_target)
+  assert.ok(hooks.tool.create_target)
+  assert.ok(hooks.tool.update_target)
+  assert.ok(hooks.tool.add_target_evidence)
+  assert.ok(hooks.tool.verify_target_gate)
+  assert.ok(hooks.tool.create_target_checkpoint)
 
   const doctorOutput = { parts: [] }
-  await hooks["command.execute.before"]({ command: "mission", sessionID: "doctor", arguments: "doctor" }, doctorOutput)
-  assert.match(doctorOutput.parts[0].text, /Mission diagnostics/)
+  await hooks["command.execute.before"]({ command: "target", sessionID: "doctor", arguments: "doctor" }, doctorOutput)
+  assert.match(doctorOutput.parts[0].text, /Target diagnostics/)
   assert.match(doctorOutput.parts[0].text, /state: ok/)
   assert.match(doctorOutput.parts[0].text, /messages API: ok/)
   assert.match(doctorOutput.parts[0].text, /children API: ok/)
-  await createMission(stateDir, "doctor-active", "Doctor lifecycle")
+  await createTarget(stateDir, "doctor-active", "Doctor lifecycle")
   const activeDoctorOutput = { parts: [] }
-  await hooks["command.execute.before"]({ command: "mission", sessionID: "doctor-active", arguments: "doctor" }, activeDoctorOutput)
+  await hooks["command.execute.before"]({ command: "target", sessionID: "doctor-active", arguments: "doctor" }, activeDoctorOutput)
   assert.match(activeDoctorOutput.parts[0].text, /schema 3/)
   assert.match(activeDoctorOutput.parts[0].text, /scheduler lease: none/)
   assert.match(activeDoctorOutput.parts[0].text, /accounting: ok/)
@@ -73,28 +73,28 @@ try {
       prompt: client.session.prompt,
     },
   }
-  const failingHooks = await MissionPlugin({ client: failingClient }, { state_dir: stateDir, auto_continue: false })
+  const failingHooks = await TargetPlugin({ client: failingClient }, { state_dir: stateDir, auto_continue: false })
   const failingDoctorOutput = { parts: [] }
-  await failingHooks["command.execute.before"]({ command: "mission", sessionID: "doctor-errors", arguments: "doctor" }, failingDoctorOutput)
+  await failingHooks["command.execute.before"]({ command: "target", sessionID: "doctor-errors", arguments: "doctor" }, failingDoctorOutput)
   assert.match(failingDoctorOutput.parts[0].text, /messages API: error/)
   assert.match(failingDoctorOutput.parts[0].text, /children API: error/)
 
   const failedActivationOutput = { parts: [] }
   await failingHooks["command.execute.before"](
-    { command: "mission", sessionID: "failed-command-activation", arguments: "Must remain absent" },
+    { command: "target", sessionID: "failed-command-activation", arguments: "Must remain absent" },
     failedActivationOutput,
   )
   assert.match(failedActivationOutput.parts[0].text, /messages API failed/)
-  assert.equal(await readMission(stateDir, "failed-command-activation"), null)
+  assert.equal(await readTarget(stateDir, "failed-command-activation"), null)
 
   await assert.rejects(
-    failingHooks.tool.create_mission.execute(
+    failingHooks.tool.create_target.execute(
       { objective: "Tool activation must remain absent" },
       { sessionID: "failed-tool-activation" },
     ),
     /messages API failed/,
   )
-  assert.equal(await readMission(stateDir, "failed-tool-activation"), null)
+  assert.equal(await readTarget(stateDir, "failed-tool-activation"), null)
 
   const malformedClient = {
     app: client.app,
@@ -104,57 +104,57 @@ try {
       prompt: client.session.prompt,
     },
   }
-  const malformedHooks = await MissionPlugin({ client: malformedClient }, { state_dir: stateDir, auto_continue: false })
+  const malformedHooks = await TargetPlugin({ client: malformedClient }, { state_dir: stateDir, auto_continue: false })
   const malformedOutput = { parts: [] }
   await malformedHooks["command.execute.before"](
-    { command: "mission", sessionID: "malformed-activation", arguments: "Reject malformed accounting" },
+    { command: "target", sessionID: "malformed-activation", arguments: "Reject malformed accounting" },
     malformedOutput,
   )
   assert.match(malformedOutput.parts[0].text, /expected an array/)
-  assert.equal(await readMission(stateDir, "malformed-activation"), null)
+  assert.equal(await readTarget(stateDir, "malformed-activation"), null)
 
-  const malformedMission = await createMission(stateDir, "malformed-get", "Live accounting must fail closed")
+  const malformedTarget = await createTarget(stateDir, "malformed-get", "Live accounting must fail closed")
   const malformedGetOutput = await assert.rejects(
-    malformedHooks.tool.get_mission.execute({}, { sessionID: "malformed-get" }),
+    malformedHooks.tool.get_target.execute({}, { sessionID: "malformed-get" }),
     (error) => error.code === "OPENCODE_MESSAGES_FAILED",
   )
   assert.equal(malformedGetOutput, undefined)
-  assert.equal((await readMission(stateDir, "malformed-get")).missionID, malformedMission.missionID)
+  assert.equal((await readTarget(stateDir, "malformed-get")).targetID, malformedTarget.targetID)
 
   const output = { parts: [{ type: "text", text: "old" }] }
-  await hooks["command.execute.before"]({ command: "mission", sessionID: "s", arguments: "Ship verified feature" }, output)
+  await hooks["command.execute.before"]({ command: "target", sessionID: "s", arguments: "Ship verified feature" }, output)
   assert.equal(output.parts.length, 1)
-  assert.match(output.parts[0].text, /Mission activated/)
-  assert.match(output.parts[0].text, /Continue working toward the active session Mission/)
+  assert.match(output.parts[0].text, /Target activated/)
+  assert.match(output.parts[0].text, /Continue working toward the active session Target/)
 
-  const state = JSON.parse(await hooks.tool.get_mission.execute({}, { sessionID: "s" }))
-  assert.equal(state.mission.status, "active")
-  assert.equal(state.mission.tokenBudget, 1000)
+  const state = JSON.parse(await hooks.tool.get_target.execute({}, { sessionID: "s" }))
+  assert.equal(state.target.status, "active")
+  assert.equal(state.target.tokenBudget, 1000)
 
   const pauseOut = { parts: [] }
-  await hooks["command.execute.before"]({ command: "msn", sessionID: "s", arguments: "pause" }, pauseOut)
-  assert.match(pauseOut.parts[0].text, /Mission paused/)
+  await hooks["command.execute.before"]({ command: "t", sessionID: "s", arguments: "pause" }, pauseOut)
+  assert.match(pauseOut.parts[0].text, /Target paused/)
 
   const resumedOut = { parts: [] }
-  await hooks["command.execute.before"]({ command: "mission", sessionID: "s", arguments: "resume" }, resumedOut)
-  assert.match(resumedOut.parts[0].text, /Mission resumed/)
+  await hooks["command.execute.before"]({ command: "target", sessionID: "s", arguments: "resume" }, resumedOut)
+  assert.match(resumedOut.parts[0].text, /Target resumed/)
 
-  const requirementResult = await hooks.tool.create_mission.execute({
+  const requirementResult = await hooks.tool.create_target.execute({
     objective: "Ship with evidence",
     requirements: [{ id: "tests", text: "Tests pass" }],
   }, { sessionID: "requirements" })
-  assert.equal(JSON.parse(requirementResult).mission.requirements[0].status, "open")
+  assert.equal(JSON.parse(requirementResult).target.requirements[0].status, "open")
   const verifyOutput = { parts: [] }
-  await hooks["command.execute.before"]({ command: "mission", sessionID: "requirements", arguments: "verify unit" }, verifyOutput)
+  await hooks["command.execute.before"]({ command: "target", sessionID: "requirements", arguments: "verify unit" }, verifyOutput)
   assert.match(verifyOutput.parts[0].text, /unit: passed/)
   const historyOutput = { parts: [] }
-  await hooks["command.execute.before"]({ command: "mission", sessionID: "requirements", arguments: "history" }, historyOutput)
-  assert.match(historyOutput.parts[0].text, /Mission history/)
+  await hooks["command.execute.before"]({ command: "target", sessionID: "requirements", arguments: "history" }, historyOutput)
+  assert.match(historyOutput.parts[0].text, /Target history/)
   const reportOutput = { parts: [] }
-  await hooks["command.execute.before"]({ command: "mission", sessionID: "requirements", arguments: "report" }, reportOutput)
+  await hooks["command.execute.before"]({ command: "target", sessionID: "requirements", arguments: "report" }, reportOutput)
   assert.match(reportOutput.parts[0].text, /requirements/)
-  const completionResult = await hooks.tool.update_mission.execute({ status: "complete" }, { sessionID: "requirements" })
-  assert.equal(JSON.parse(completionResult).mission.status, "complete")
+  const completionResult = await hooks.tool.update_target.execute({ status: "complete" }, { sessionID: "requirements" })
+  assert.equal(JSON.parse(completionResult).target.status, "complete")
 
   console.log("server smoke: ok")
 } finally {

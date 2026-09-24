@@ -70,11 +70,11 @@ for (const file of [
   "src/adapter.js",
   "src/scheduler.js",
   "src/traversal.js",
-  "dist/mission.js",
+  "dist/target.js",
 ]) {
   await runNode(["--check", file], root, { quiet: true })
 }
-await runNode(["-e", "import('./dist/mission.js').then(m => { if (typeof m.MissionPlugin !== 'function') process.exit(1) })"], root, { quiet: true })
+await runNode(["-e", "import('./dist/target.js').then(m => { if (typeof m.TargetPlugin !== 'function') process.exit(1) })"], root, { quiet: true })
 for (const file of [
   "test/core.test.js",
   "test/adapter.test.js",
@@ -88,14 +88,14 @@ for (const file of [
 for (const file of ["test/server-smoke.mjs", "test/continuation-smoke.mjs", "test/budget-wrapup-smoke.mjs", "test/restart-smoke.mjs"]) {
   await runNode([file], root, { quiet: true })
 }
-const artifact = path.join(root, "dist", "mission.js")
+const artifact = path.join(root, "dist", "target.js")
 const firstHash = await hash(artifact)
 console.log("release check: verifying deterministic build")
 await runNode(["scripts/build-local.mjs"], root, { quiet: true })
 const secondHash = await hash(artifact)
-if (firstHash !== secondHash) throw new Error("Generated dist/mission.js is not deterministic.")
+if (firstHash !== secondHash) throw new Error("Generated dist/target.js is not deterministic.")
 
-const temp = await mkdtemp(path.join(os.tmpdir(), "opencode-mission-pack-"))
+const temp = await mkdtemp(path.join(os.tmpdir(), "opencode-target-pack-"))
 let archive = null
 let temporaryArchive = null
 try {
@@ -114,8 +114,8 @@ try {
     packageInfo.filename,
     "@opencode-ai/plugin@1.18.30",
   ], temp)
-  await runNode(["-e", "import('opencode-mission').then(m => { if (typeof m.MissionPlugin !== 'function') process.exit(1) })"], temp, { quiet: true })
-  const installed = await readdir(path.join(temp, "node_modules", "opencode-mission"))
+  await runNode(["-e", "import('opencode-target').then(m => { if (typeof m.TargetPlugin !== 'function') process.exit(1) })"], temp, { quiet: true })
+  const installed = await readdir(path.join(temp, "node_modules", "opencode-target"))
   for (const required of ["README.md", "dist", "src", "docs", "install.sh", "install.ps1"]) {
     if (!installed.includes(required)) throw new Error(`Package is missing ${required}.`)
   }

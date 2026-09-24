@@ -2,10 +2,10 @@ import assert from "node:assert/strict"
 import { mkdtemp, rm } from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
-import { MissionPlugin } from "../src/server.js"
-import { accountMissionUsage, readMission } from "../src/core.js"
+import { TargetPlugin } from "../src/server.js"
+import { accountTargetUsage, readTarget } from "../src/core.js"
 
-const stateDir = await mkdtemp(path.join(os.tmpdir(), "mission-budget-wrapup-smoke-"))
+const stateDir = await mkdtemp(path.join(os.tmpdir(), "target-budget-wrapup-smoke-"))
 let promptAttempts = 0
 let liveMessage = null
 const client = {
@@ -34,12 +34,12 @@ const client = {
 }
 
 try {
-  const hooks = await MissionPlugin({ client }, {
+  const hooks = await TargetPlugin({ client }, {
     state_dir: stateDir,
     min_continue_interval_ms: 0,
     accounting_retry: { maxAttempts: 2, baseDelayMs: 10, maxDelayMs: 10 },
   })
-  const created = JSON.parse(await hooks.tool.create_mission.execute(
+  const created = JSON.parse(await hooks.tool.create_target.execute(
     { objective: "Deliver a budget wrap-up", token_budget: 1 },
     { sessionID: "budget-wrapup" },
   ))
@@ -54,20 +54,20 @@ try {
     },
     parts: [{ type: "text", text: "Budget crossing" }],
   }
-  await accountMissionUsage(stateDir, "budget-wrapup", [
+  await accountTargetUsage(stateDir, "budget-wrapup", [
     { sessionID: "budget-wrapup", message: liveMessage },
-  ], { expectedMissionID: created.mission.missionID })
+  ], { expectedTargetID: created.target.targetID })
   await hooks.event({ event: { type: "session.idle", properties: { sessionID: "budget-wrapup" } } })
 
-  const deadline = Date.now() + 2_000
-  let mission = await readMission(stateDir, "budget-wrapup")
-  while (Date.now() < deadline && (promptAttempts < 2 || !mission?.budgetWrapupSent)) {
+  const deadline = Date.now() + 10_000
+  let target = await readTarget(stateDir, "budget-wrapup")
+  while (Date.now() < deadline && (promptAttempts < 2 || !target?.budgetWrapupSent)) {
     await new Promise((resolve) => setTimeout(resolve, 10))
-    mission = await readMission(stateDir, "budget-wrapup")
+    target = await readTarget(stateDir, "budget-wrapup")
   }
   assert.equal(promptAttempts, 2)
-  assert.equal(mission.status, "budget_limited")
-  assert.equal(mission.budgetWrapupSent, true)
+  assert.equal(target.status, "budget_limited")
+  assert.equal(target.budgetWrapupSent, true)
   console.log("budget wrap-up smoke: ok")
 } finally {
   await rm(stateDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 25 })

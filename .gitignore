@@ -1,7 +1,7 @@
 node_modules/
 
-# Local Mission state and transient lock/write files
-.opencode-mission/
+# Local Target state and transient lock/write files
+.opencode-target/
 *.lock
 *.tmp
 

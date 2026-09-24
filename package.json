@@ -1,15 +1,27 @@
 {
-  "name": "opencode-mission",
+  "name": "opencode-target",
   "version": "0.1.1",
-  "description": "Persistent Codex-style Mission runtime for OpenCode: verified multi-turn objectives, budgets, auto-continuation, and circuit breakers.",
+  "description": "Persistent Codex-style Target runtime for OpenCode: verified multi-turn objectives, budgets, auto-continuation, and circuit breakers.",
+  "private": true,
   "type": "module",
   "main": "./src/server.js",
   "exports": {
     ".": "./src/server.js"
   },
+  "engines": {
+    "node": ">=22"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/demyanovvvv/opencode-target.git"
+  },
+  "bugs": {
+    "url": "https://github.com/demyanovvvv/opencode-target/issues"
+  },
+  "homepage": "https://github.com/demyanovvvv/opencode-target#readme",
   "files": [
     "src",
-    "dist/mission.js",
+    "dist/target.js",
     "README.md",
     "LICENSE",
     "docs",
@@ -19,7 +31,7 @@
   "keywords": [
     "opencode",
     "plugin",
-    "mission",
+    "target",
     "goal",
     "agent",
     "autonomous",
@@ -38,10 +50,10 @@
   },
   "scripts": {
     "build:local": "node scripts/build-local.mjs",
-    "test:unit": "node --test test/core.test.js test/adapter.test.js test/store.test.js test/ledger.test.js test/scheduler.test.js test/traversal.test.js",
+    "test:unit": "node --test test/core.test.js test/adapter.test.js test/store.test.js test/ledger.test.js test/scheduler.test.js test/traversal.test.js test/repository.test.js test/verification.test.js test/continuation.test.js test/options.test.js test/host.test.js test/errors.test.js test/event-routing.test.js test/error-lifecycle.test.js test/tool-accounting.test.js test/verification-gate.test.js test/context-hooks.test.js test/commands.test.js",
     "test:smoke": "node test/server-smoke.mjs && node test/continuation-smoke.mjs && node test/budget-wrapup-smoke.mjs && node test/restart-smoke.mjs",
     "test": "npm run test:unit && npm run test:smoke",
-    "check": "npm run build:local && node --check src/core.js && node --check src/server.js && node --check src/store.js && node --check src/ledger.js && node --check src/adapter.js && node --check src/scheduler.js && node --check src/traversal.js && node --check dist/mission.js && node -e \"import('./dist/mission.js').then(m => { if (typeof m.MissionPlugin !== 'function') process.exit(1) })\" && npm run test",
+    "check": "npm run build:local && node --check src/core.js && node --check src/server.js && node --check src/options.js && node --check src/host.js && node --check src/errors.js && node --check src/event-routing.js && node --check src/error-lifecycle.js && node --check src/tool-accounting.js && node --check src/verification-gate.js && node --check src/context-hooks.js && node --check src/commands.js && node --check src/store.js && node --check src/repository.js && node --check src/verification.js && node --check src/continuation.js && node --check src/ledger.js && node --check src/adapter.js && node --check src/scheduler.js && node --check src/traversal.js && node --check dist/target.js && node scripts/check-dist.mjs && npm run test",
     "release:check": "node scripts/release-check.mjs"
   },
   "license": "MIT"
