@@ -454,16 +454,29 @@ and runtime stop reasons.
 ## Source layout
 
 ```text
-src/core.js       durable state machine, accounting, prompts, command parser
-src/store.js      atomic state store, locks, quarantine, concurrent mutation seam
-src/ledger.js     token extraction, delta watermarks, root/descendant accounting
-src/adapter.js    typed OpenCode and best-effort Git integration seams
-src/scheduler.js  instance-scoped continuation exclusion, rechecks, heartbeats
-src/traversal.js  complete bounded child-session usage traversal
-src/server.js     OpenCode hooks, tools, continuation and accounting integration
-dist/target.js   self-contained local-plugin build
-test/*.test.js    focused core, store, ledger, adapter, and scheduler unit tests
+src/core.js               durable state machine, accounting, prompts, command parser
+src/store.js              atomic state store, locks, quarantine, Windows rename retry
+src/repository.js         persistence repository mutation seam
+src/ledger.js             token extraction, delta watermarks, root/descendant accounting
+src/adapter.js            typed OpenCode and best-effort Git integration seams
+src/scheduler.js          continuation exclusion, rechecks, heartbeats, whenIdle settling
+src/traversal.js          complete bounded child-session usage traversal
+src/continuation.js       continuation phase decisions and recheck behavior
+src/verification.js       normalized verification result contract
+src/verification-gate.js  trusted verification gate execution
+src/options.js            plugin option parsing and validation
+src/host.js               OpenCode host session adapter
+src/errors.js             typed error classification
+src/error-lifecycle.js    session.error lifecycle handling
+src/event-routing.js      session event to action routing
+src/context-hooks.js      compaction auto-continue suppression
+src/tool-accounting.js    tool-boundary token accounting
+src/commands.js           slash command handling
+src/server.js             OpenCode hook wiring and dependency-binding wrappers
+dist/target.js            self-contained local-plugin build
+test/*.test.js            focused per-module unit tests
 scripts/build-local.mjs
+scripts/check-dist.mjs
 ```
 
 ## Development and operations
@@ -480,6 +493,7 @@ The full test command includes the core unit suite and server, continuation, bud
 restart recovery smoke suites. Maintainer and
 operator procedures are documented in:
 
+- [`CHANGELOG.md`](CHANGELOG.md)
 - [`docs/contributing.md`](docs/contributing.md)
 - [`docs/operations.md`](docs/operations.md)
 - [`docs/release.md`](docs/release.md)
@@ -540,7 +554,11 @@ The included test suite covers:
 - resume audit reset;
 - continuation deferral;
 - command parsing;
-- remaining-budget snapshots.
+- remaining-budget snapshots;
+- per-module coverage for options, host adapter, error classification, event routing,
+  `session.error` lifecycle, tool-boundary accounting, verification gates, context hooks, commands,
+  repository, and continuation phases;
+- scheduler idle settling (`whenIdle` / `isSettled`) and deterministic smoke completion.
 
 Run:
 

@@ -1,6 +1,6 @@
 {
   "name": "opencode-target",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "Persistent Codex-style Target runtime for OpenCode: verified multi-turn objectives, budgets, auto-continuation, and circuit breakers.",
   "private": true,
   "type": "module",
@@ -23,6 +23,7 @@
     "src",
     "dist/target.js",
     "README.md",
+    "CHANGELOG.md",
     "LICENSE",
     "docs",
     "install.sh",

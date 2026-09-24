@@ -3,10 +3,12 @@
 ## Prepare
 
 1. Review user-visible changes and update `README.md`.
-2. Update `docs/architecture.md`, `docs/state-format.md`, `docs/compatibility.md`, or
+2. Add the release entry to `CHANGELOG.md` and update the comparison links.
+3. Update `docs/architecture.md`, `docs/state-format.md`, `docs/compatibility.md`, or
    `docs/codex-parity.md` when the corresponding behavior changes.
-3. Update the package version in `package.json` according to the release type.
-4. Review the package `files` list and confirm it contains source, generated plugin, docs, and installers.
+4. Update the package version in `package.json` according to the release type.
+5. Review the package `files` list and confirm it contains source, generated plugin, docs, changelog,
+   and installers.
 
 ## Verify
 

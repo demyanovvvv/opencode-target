@@ -149,6 +149,11 @@ A phase context is passed to the runner so host failures are classified by the p
 failed, including failures thrown before a phase result can be returned. The coordinator accepts
 operation adapters, making phase decisions testable without OpenCode hooks or filesystem state.
 
+`SchedulerState.whenIdle(sessionID)` resolves once a session has no in-flight run and no scheduled
+recheck. The plugin exposes it as `hooks.whenIdle` so embedders and tests can await the real
+completion signal of a `session.idle`-driven continuation chain instead of polling timestamps.
+Waiters are released on session and host disposal.
+
 Verification commands are normalized through `normalizeVerificationResult` before evidence is
 recorded. Target state receives one stable result shape rather than shell-specific exit-code and
 output handling.

@@ -62,30 +62,23 @@ async function hash(file) {
 
 console.log("release check: running full check")
 await runNode(["scripts/build-local.mjs"], root, { quiet: true })
-for (const file of [
-  "src/core.js",
-  "src/server.js",
-  "src/store.js",
-  "src/ledger.js",
-  "src/adapter.js",
-  "src/scheduler.js",
-  "src/traversal.js",
-  "dist/target.js",
-]) {
+const sourceFiles = (await readdir(path.join(root, "src")))
+  .filter((name) => name.endsWith(".js"))
+  .map((name) => path.posix.join("src", name))
+for (const file of [...sourceFiles, "dist/target.js"]) {
   await runNode(["--check", file], root, { quiet: true })
 }
 await runNode(["-e", "import('./dist/target.js').then(m => { if (typeof m.TargetPlugin !== 'function') process.exit(1) })"], root, { quiet: true })
-for (const file of [
-  "test/core.test.js",
-  "test/adapter.test.js",
-  "test/store.test.js",
-  "test/ledger.test.js",
-  "test/scheduler.test.js",
-  "test/traversal.test.js",
-]) {
+const unitTests = (await readdir(path.join(root, "test")))
+  .filter((name) => name.endsWith(".test.js"))
+  .map((name) => path.posix.join("test", name))
+for (const file of unitTests) {
   await runNode(["--test", file], root, { quiet: true })
 }
-for (const file of ["test/server-smoke.mjs", "test/continuation-smoke.mjs", "test/budget-wrapup-smoke.mjs", "test/restart-smoke.mjs"]) {
+const smokeTests = (await readdir(path.join(root, "test")))
+  .filter((name) => name.endsWith("-smoke.mjs"))
+  .map((name) => path.posix.join("test", name))
+for (const file of smokeTests) {
   await runNode([file], root, { quiet: true })
 }
 const artifact = path.join(root, "dist", "target.js")
