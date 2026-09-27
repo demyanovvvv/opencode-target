@@ -86,6 +86,10 @@ test("Target lifecycle: create, pause, resume, complete, then replace with a fre
 
     const complete = await setStoppedStatus(dir, "s1", "complete", "verified", a.targetID)
     assert.equal(complete.status, "complete")
+    await assert.rejects(
+      () => pauseTarget(dir, "s1", "late pause", a.targetID),
+      /Completed Targets are immutable/,
+    )
 
     const b = await createTarget(dir, "s1", "Second target", 5_000)
     assert.equal(b.status, "active")

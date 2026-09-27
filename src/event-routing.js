@@ -1,5 +1,5 @@
 function getEventSessionID(event) {
-  return event?.properties?.sessionID || event?.properties?.sessionId || event?.sessionID || event?.sessionId || null
+  return event?.properties?.sessionID || event?.properties?.sessionId || event?.properties?.info?.id || event?.sessionID || event?.sessionId || null
 }
 
 export function resolveEventAction(event, autoContinue = true) {

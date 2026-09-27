@@ -216,6 +216,26 @@ function requirePrompt(value, sessionID) {
   throw error
 }
 
+async function withTimeout(operation, timeoutMs, endpoint, sessionID) {
+  const limit = Number(timeoutMs)
+  if (!Number.isFinite(limit) || limit <= 0) return operation()
+  let timer
+  try {
+    return await Promise.race([
+      operation(),
+      new Promise((_, reject) => {
+        timer = setTimeout(() => {
+          const error = new Error(`OpenCode ${endpoint} API timed out after ${limit}ms for session ${sessionID}.`)
+          error.code = "OPENCODE_HOST_TIMEOUT"
+          reject(error)
+        }, limit)
+      }),
+    ])
+  } finally {
+    if (timer !== undefined) clearTimeout(timer)
+  }
+}
+
 function createGitAdapter({ exec = execFileAsync } = {}) {
   return {
     async fingerprint(cwd = process.cwd()) {
@@ -226,11 +246,16 @@ function createGitAdapter({ exec = execFileAsync } = {}) {
   }
 }
 
-function createOpenCodeAdapter(client) {
+function createOpenCodeAdapter(client, { timeoutMs = 30_000 } = {}) {
   return {
     async messages(sessionID) {
       try {
-        const data = unwrapData(await client.session.messages({ path: { id: sessionID } }))
+        const data = unwrapData(await withTimeout(
+          () => client.session.messages({ path: { id: sessionID } }),
+          timeoutMs,
+          "messages",
+          sessionID,
+        ))
         return requireArray(data, "messages", sessionID)
       } catch (error) {
         if (error?.code === "OPENCODE_MESSAGES_FAILED") throw error
@@ -242,7 +267,12 @@ function createOpenCodeAdapter(client) {
     },
     async children(sessionID) {
       try {
-        const data = unwrapData(await client.session.children({ path: { id: sessionID } }))
+        const data = unwrapData(await withTimeout(
+          () => client.session.children({ path: { id: sessionID } }),
+          timeoutMs,
+          "children",
+          sessionID,
+        ))
         return requireArray(data, "children", sessionID)
       } catch (error) {
         if (error?.code === "OPENCODE_CHILDREN_FAILED") throw error
@@ -254,10 +284,15 @@ function createOpenCodeAdapter(client) {
     },
     async prompt(sessionID, text) {
       try {
-        const response = await client.session.prompt({
-          path: { id: sessionID },
-          body: { parts: [{ type: "text", text, synthetic: true }] },
-        })
+        const response = await withTimeout(
+          () => client.session.prompt({
+            path: { id: sessionID },
+            body: { parts: [{ type: "text", text, synthetic: true }] },
+          }),
+          timeoutMs,
+          "prompt",
+          sessionID,
+        )
         return requirePrompt(unwrapData(response), sessionID)
       } catch (error) {
         if (error?.code === "OPENCODE_PROMPT_FAILED") throw error
@@ -675,6 +710,7 @@ function normalizePluginOptions(options = {}) {
     command_name: commandName,
     alias,
     auto_continue: options.auto_continue ?? true,
+    host_api_timeout_ms: integerOption(options, "host_api_timeout_ms", 30_000, 1),
     max_target_token_budget: maxBudget,
     min_continue_interval_ms: integerOption(options, "min_continue_interval_ms", 250, 0),
     failed_exec_threshold: integerOption(options, "failed_exec_threshold", 3, 1),
@@ -736,7 +772,7 @@ function isTransientAccountingError(error) {
 }
 
 function getEventSessionID(event) {
-  return event?.properties?.sessionID || event?.properties?.sessionId || event?.sessionID || event?.sessionId || null
+  return event?.properties?.sessionID || event?.properties?.sessionId || event?.properties?.info?.id || event?.sessionID || event?.sessionId || null
 }
 
 function resolveEventAction(event, autoContinue = true) {
@@ -819,9 +855,6 @@ async function disableCompactionAutocontinue({ input, output, stateDir, readTarg
   if (target?.status === "active") output.enabled = false
 }
 
-const COMMAND_DEFAULT = "target"
-const ALIAS_DEFAULT = "t"
-
 function commandResultPrompt(action, target, continueNow = false, extraContext = "") {
   if (continueNow && target?.status === "active") {
     const blocks = [action, extraContext, continuationPrompt(target)].filter(Boolean)
@@ -843,6 +876,8 @@ async function handleSlashCommand(host, $, workspaceDirectory, stateDir, session
   } = dependencies
   const client = host.adapter || host
   const parsed = parseTargetCommand(rawArguments)
+  const commandName = options.command_name || "target"
+  const aliasName = options.alias === false ? null : (options.alias || "t")
   const maxBudget = getConfiguredMaxBudget(options)
   const createOptions = {
     maxTokenBudget: maxBudget,
@@ -861,7 +896,7 @@ async function handleSlashCommand(host, $, workspaceDirectory, stateDir, session
   if (parsed.op === "help") {
     const target = await readTarget(stateDir, sessionID)
     if (target?.status === "active") await deferNextContinuation(stateDir, sessionID, 1, target.targetID)
-    return commandResultPrompt(targetHelp(COMMAND_DEFAULT, ALIAS_DEFAULT), target, false)
+    return commandResultPrompt(targetHelp(commandName, aliasName), target, false)
   }
 
   if (parsed.op === "doctor") {
@@ -1506,6 +1541,9 @@ async function setStoppedStatus(
     const target = await readTarget(stateDir, sessionID)
     if (!target) throw new Error("No Target exists for this session.")
     if (!ensureExpectedTarget(target, expectedTargetID)) return null
+    if (target.status === "complete" && status !== "complete") {
+      throw new Error("Completed Targets are immutable; start a new Target instead.")
+    }
     const at = nowMs()
     refreshClock(target, at)
 
@@ -2478,6 +2516,15 @@ async function processIdle(scheduler, host, stateDir, sessionID, options) {
           `Accounting incomplete: ${error.message}`.slice(0, 500),
           expectedTargetID,
         ).catch(() => {})
+      } else if (expectedTargetID) {
+        scheduler.resetRetries(sessionID)
+        await setStoppedStatus(
+          stateDir,
+          sessionID,
+          "blocked",
+          `Continuation failed unexpectedly: ${error?.message || String(error)}`.slice(0, 500),
+          expectedTargetID,
+        ).catch(() => {})
       }
       await log(host.client, "error", "Target idle continuation failed", {
         sessionID,
@@ -2511,7 +2558,7 @@ function completionResponse(target) {
 
 export const TargetPlugin = async ({ client, $, directory }, rawOptions = {}) => {
   const options = normalizePluginOptions(rawOptions)
-  const adapter = createOpenCodeAdapter(client)
+  const adapter = createOpenCodeAdapter(client, { timeoutMs: options.host_api_timeout_ms })
   const host = { adapter, client }
   const scheduler = new SchedulerState()
   const stateDir = options.state_dir ? String(options.state_dir) : defaultStateDir()
@@ -2692,7 +2739,7 @@ export const TargetPlugin = async ({ client, $, directory }, rawOptions = {}) =>
     "command.execute.before": async (input, output) => {
       if (input.command !== commandName && input.command !== aliasName) return
       try {
-        const prompt = await runSlashCommand(host, $, directory, stateDir, input.sessionID, input.arguments, options, {
+        const prompt = await handleSlashCommand(host, $, directory, stateDir, input.sessionID, input.arguments, options, {
           collectSessionUsage,
           getWorktreeFingerprint,
           targetDiagnostics,

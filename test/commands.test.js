@@ -45,6 +45,25 @@ test("slash command handler creates and views a Target through explicit dependen
   })
 })
 
+test("help uses configured command name and alias", async () => {
+  await withState(async (stateDir) => {
+    const options = {
+      command_name: "mission",
+      alias: "m",
+      max_target_token_budget: null,
+      descendant_max_depth: 6,
+      descendant_max_sessions: 96,
+      max_automatic_turns: null,
+      max_active_seconds: null,
+      max_no_progress_turns: null,
+    }
+    const prompt = await handleSlashCommand({ client: {} }, null, process.cwd(), stateDir, "custom-help", "help", options, dependencies())
+    assert.match(prompt, /\/mission <objective>/)
+    assert.match(prompt, /\/m \.\.\./)
+    assert.doesNotMatch(prompt, /\/target <objective>/)
+  })
+})
+
 test("slash command handler preserves pause and resume transitions", async () => {
   await withState(async (stateDir) => {
     const options = { max_target_token_budget: null, descendant_max_depth: 6, descendant_max_sessions: 96 }

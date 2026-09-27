@@ -71,7 +71,15 @@ decide Target status.
 
 `src/event-routing.js` maps host events to a small set of lifecycle actions before the server runs
 the associated operation. It handles disposed instances, deleted sessions, idle continuations,
-and session errors; routing itself has no state or scheduler side effects.
+and session errors; routing itself has no state or scheduler side effects. The deleted-session
+route accepts both a direct session ID and the OpenCode SDK shape where the ID is stored at
+`event.properties.info.id`.
+
+## Terminal Target immutability
+
+`complete` is terminal. Once a Target is completed, pause, block, usage-limit, and budget-control
+mutations are rejected. A subsequent objective must create a new Target with a fresh ID. This
+prevents a later control command or delayed runtime callback from reopening a verified objective.
 
 `src/error-lifecycle.js` owns the session-error transition. `resolveErrorStatus` is a pure
 classifier that maps error text plus the current Target status to the next status, honoring that
@@ -79,6 +87,10 @@ usage limits supersede a just-crossed budget limit while pause/blocked do not ov
 `budget_limited`. `handleSessionError` accounts live usage first, rejects stale targets, then
 persists the classified stop through injected operations; it never reads files directly and has
 no scheduler side effects.
+
+Continuation host failures are fail-closed: typed OpenCode API failures pause the Target after
+bounded retries, while unexpected continuation exceptions block it. The scheduler never leaves
+an active Target behind after a failed continuation attempt.
 
 `src/tool-accounting.js` owns the lightweight root-session accounting performed after tool
 execution. `accountToolBoundary` skips missing or non-accountable targets (only `active` and

@@ -46,6 +46,21 @@ test("OpenCode adapter rejects malformed successful list payloads", async () => 
   )
 })
 
+test("OpenCode adapter bounds a hanging host API call", async () => {
+  const adapter = createOpenCodeAdapter({
+    session: {
+      messages: async () => new Promise(() => {}),
+      children: async () => ({ data: [] }),
+      prompt: async () => ({ data: { info: { id: "reply", role: "assistant" }, parts: [] } }),
+    },
+  }, { timeoutMs: 10 })
+
+  await assert.rejects(
+    adapter.messages("hanging-session"),
+    (error) => error.code === "OPENCODE_MESSAGES_FAILED" && error.cause?.code === "OPENCODE_HOST_TIMEOUT",
+  )
+})
+
 test("OpenCode adapter accepts direct arrays and SDK data envelopes", async () => {
   const directMessage = { info: { id: "m" } }
   const child = { id: "child" }

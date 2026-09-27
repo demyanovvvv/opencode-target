@@ -156,6 +156,63 @@ try {
   const completionResult = await hooks.tool.update_target.execute({ status: "complete" }, { sessionID: "requirements" })
   assert.equal(JSON.parse(completionResult).target.status, "complete")
 
+  const hangingHooks = await TargetPlugin({
+    client: {
+      app: client.app,
+      session: {
+        messages: async () => new Promise(() => {}),
+        children: async () => ({ data: [] }),
+        prompt: client.session.prompt,
+      },
+    },
+  }, {
+    state_dir: stateDir,
+    host_api_timeout_ms: 10,
+    accounting_retry: { maxAttempts: 1, baseDelayMs: 1, maxDelayMs: 1 },
+  })
+  await createTarget(stateDir, "hanging-api", "Pause after a hanging host API")
+  await hangingHooks.event({ event: { type: "session.idle", properties: { sessionID: "hanging-api" } } })
+  await hangingHooks.whenIdle("hanging-api")
+  assert.equal((await readTarget(stateDir, "hanging-api")).status, "paused")
+
+  const providerFailureHooks = await TargetPlugin({
+    client: {
+      app: client.app,
+      session: {
+        messages: async () => ({ data: [] }),
+        children: async () => ({ data: [] }),
+        prompt: async () => { throw new Error("Provider returned empty content") },
+      },
+    },
+  }, {
+    state_dir: stateDir,
+    min_continue_interval_ms: 0,
+    accounting_retry: { maxAttempts: 1, baseDelayMs: 1, maxDelayMs: 1 },
+  })
+  await createTarget(stateDir, "provider-failure", "Stop after provider failure")
+  await providerFailureHooks.event({ event: { type: "session.idle", properties: { sessionID: "provider-failure" } } })
+  await providerFailureHooks.whenIdle("provider-failure")
+  const providerFailureTarget = await readTarget(stateDir, "provider-failure")
+  assert.equal(providerFailureTarget.status, "paused")
+  assert.match(providerFailureTarget.stopReason, /Continuation host API unavailable/)
+
+  const unexpectedFailureHooks = await TargetPlugin({
+    client: {
+      app: client.app,
+      session: {
+        messages: async () => ({ data: [] }),
+        children: async () => ({ data: [] }),
+        prompt: async () => ({ data: { info: null, parts: null } }),
+      },
+    },
+  }, { state_dir: stateDir, min_continue_interval_ms: 0 })
+  await createTarget(stateDir, "unexpected-failure", "Stop after unexpected continuation failure")
+  await unexpectedFailureHooks.event({ event: { type: "session.idle", properties: { sessionID: "unexpected-failure" } } })
+  await unexpectedFailureHooks.whenIdle("unexpected-failure")
+  const unexpectedFailureTarget = await readTarget(stateDir, "unexpected-failure")
+  assert.equal(unexpectedFailureTarget.status, "paused")
+  assert.match(unexpectedFailureTarget.stopReason, /Continuation host API unavailable/)
+
   console.log("server smoke: ok")
 } finally {
   await rm(stateDir, { recursive: true, force: true })

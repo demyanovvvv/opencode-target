@@ -10,7 +10,7 @@ import { resolveEventAction } from "./event-routing.js"
 import { handleSessionError } from "./error-lifecycle.js"
 import { accountToolBoundary } from "./tool-accounting.js"
 import { applyCompactionContext, applySystemPolicy, disableCompactionAutocontinue } from "./context-hooks.js"
-import { handleSlashCommand as runSlashCommand } from "./commands.js"
+import { handleSlashCommand } from "./commands.js"
 import { collectSessionUsage } from "./traversal.js"
 import {
   accountTargetUsage,
@@ -202,6 +202,15 @@ async function processIdle(scheduler, host, stateDir, sessionID, options) {
           `Accounting incomplete: ${error.message}`.slice(0, 500),
           expectedTargetID,
         ).catch(() => {})
+      } else if (expectedTargetID) {
+        scheduler.resetRetries(sessionID)
+        await setStoppedStatus(
+          stateDir,
+          sessionID,
+          "blocked",
+          `Continuation failed unexpectedly: ${error?.message || String(error)}`.slice(0, 500),
+          expectedTargetID,
+        ).catch(() => {})
       }
       await log(host.client, "error", "Target idle continuation failed", {
         sessionID,
@@ -235,7 +244,7 @@ function completionResponse(target) {
 
 export const TargetPlugin = async ({ client, $, directory }, rawOptions = {}) => {
   const options = normalizePluginOptions(rawOptions)
-  const adapter = createOpenCodeAdapter(client)
+  const adapter = createOpenCodeAdapter(client, { timeoutMs: options.host_api_timeout_ms })
   const host = { adapter, client }
   const scheduler = new SchedulerState()
   const stateDir = options.state_dir ? String(options.state_dir) : defaultStateDir()
@@ -416,7 +425,7 @@ export const TargetPlugin = async ({ client, $, directory }, rawOptions = {}) =>
     "command.execute.before": async (input, output) => {
       if (input.command !== commandName && input.command !== aliasName) return
       try {
-        const prompt = await runSlashCommand(host, $, directory, stateDir, input.sessionID, input.arguments, options, {
+        const prompt = await handleSlashCommand(host, $, directory, stateDir, input.sessionID, input.arguments, options, {
           collectSessionUsage,
           getWorktreeFingerprint,
           targetDiagnostics,
