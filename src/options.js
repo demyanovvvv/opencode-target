@@ -54,6 +54,7 @@ export function normalizePluginOptions(options = {}) {
     command_name: commandName,
     alias,
     auto_continue: options.auto_continue ?? true,
+    host_api_timeout_ms: integerOption(options, "host_api_timeout_ms", 30_000, 1),
     max_target_token_budget: maxBudget,
     min_continue_interval_ms: integerOption(options, "min_continue_interval_ms", 250, 0),
     failed_exec_threshold: integerOption(options, "failed_exec_threshold", 3, 1),

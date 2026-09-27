@@ -39,6 +39,10 @@ Runtime logs are written through `client.app.log` and use the `opencode-target` 
 An API error is not interpreted as an empty response, because doing so could hide usage or
 descendant-session data.
 
+Completed Targets are terminal. If `/target pause`, `/target resume`, or another delayed control
+operation is sent after completion, the command is rejected; start a new Target for a new
+objective instead.
+
 If state JSON is malformed, Target moves it to `<state_dir>/corrupt/` with a timestamp suffix and
 raises a `TARGET_STATE_CORRUPT` diagnostic. Preserve that file before manual recovery.
 
@@ -53,6 +57,14 @@ Check these in order:
 5. Check whether a control command intentionally deferred one continuation.
 6. Inspect OpenCode logs for a runtime error or a continuation scheduling failure.
 7. If the Target is paused or blocked, resolve the reason and run `/target resume`.
+
+Host API calls have a bounded `host_api_timeout_ms` (30 seconds by default). A timeout is retried
+according to `accounting_retry`; after the retry budget is exhausted, the active Target is paused
+with a diagnostic stop reason instead of remaining indefinitely in an in-flight continuation.
+
+Provider prompt failures follow the same fail-closed rule. Typed OpenCode prompt failures pause
+the Target after bounded retries; unexpected continuation exceptions block it with a bounded
+diagnostic reason. Neither path leaves an active Target eligible for an uncontrolled retry loop.
 
 If an OpenCode process exits while owning continuation, its persisted scheduler lease becomes
 recoverable after `scheduler_lease_ms` (30 seconds by default). A later `session.idle` event can

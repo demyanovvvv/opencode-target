@@ -11,6 +11,7 @@ test("normalizes plugin defaults and nested verification retry policy", () => {
   assert.equal(options.command_name, "target")
   assert.equal(options.alias, "t")
   assert.equal(options.auto_continue, true)
+  assert.equal(options.host_api_timeout_ms, 30_000)
   assert.equal(options.scheduler_lease_ms, 30_000)
   assert.deepEqual(options.verification, [{
     id: "lint",
@@ -26,6 +27,7 @@ test("rejects malformed plugin options with stable validation errors", () => {
   assert.throws(() => normalizePluginOptions([]), /options must be an object/)
   assert.throws(() => normalizePluginOptions({ command_name: "two words" }), /command_name/)
   assert.throws(() => normalizePluginOptions({ scheduler_lease_ms: 999 }), /scheduler_lease_ms/)
+  assert.throws(() => normalizePluginOptions({ host_api_timeout_ms: 0 }), /host_api_timeout_ms/)
   assert.throws(() => normalizePluginOptions({ verification: [{ command: " " }] }), /verification entries/)
   assert.throws(() => normalizePluginOptions({ exec_tool_names: [" "] }), /exec_tool_names/)
 })

@@ -22,6 +22,26 @@ function requirePrompt(value, sessionID) {
   throw error
 }
 
+async function withTimeout(operation, timeoutMs, endpoint, sessionID) {
+  const limit = Number(timeoutMs)
+  if (!Number.isFinite(limit) || limit <= 0) return operation()
+  let timer
+  try {
+    return await Promise.race([
+      operation(),
+      new Promise((_, reject) => {
+        timer = setTimeout(() => {
+          const error = new Error(`OpenCode ${endpoint} API timed out after ${limit}ms for session ${sessionID}.`)
+          error.code = "OPENCODE_HOST_TIMEOUT"
+          reject(error)
+        }, limit)
+      }),
+    ])
+  } finally {
+    if (timer !== undefined) clearTimeout(timer)
+  }
+}
+
 export function createGitAdapter({ exec = execFileAsync } = {}) {
   return {
     async fingerprint(cwd = process.cwd()) {
@@ -32,11 +52,16 @@ export function createGitAdapter({ exec = execFileAsync } = {}) {
   }
 }
 
-export function createOpenCodeAdapter(client) {
+export function createOpenCodeAdapter(client, { timeoutMs = 30_000 } = {}) {
   return {
     async messages(sessionID) {
       try {
-        const data = unwrapData(await client.session.messages({ path: { id: sessionID } }))
+        const data = unwrapData(await withTimeout(
+          () => client.session.messages({ path: { id: sessionID } }),
+          timeoutMs,
+          "messages",
+          sessionID,
+        ))
         return requireArray(data, "messages", sessionID)
       } catch (error) {
         if (error?.code === "OPENCODE_MESSAGES_FAILED") throw error
@@ -48,7 +73,12 @@ export function createOpenCodeAdapter(client) {
     },
     async children(sessionID) {
       try {
-        const data = unwrapData(await client.session.children({ path: { id: sessionID } }))
+        const data = unwrapData(await withTimeout(
+          () => client.session.children({ path: { id: sessionID } }),
+          timeoutMs,
+          "children",
+          sessionID,
+        ))
         return requireArray(data, "children", sessionID)
       } catch (error) {
         if (error?.code === "OPENCODE_CHILDREN_FAILED") throw error
@@ -60,10 +90,15 @@ export function createOpenCodeAdapter(client) {
     },
     async prompt(sessionID, text) {
       try {
-        const response = await client.session.prompt({
-          path: { id: sessionID },
-          body: { parts: [{ type: "text", text, synthetic: true }] },
-        })
+        const response = await withTimeout(
+          () => client.session.prompt({
+            path: { id: sessionID },
+            body: { parts: [{ type: "text", text, synthetic: true }] },
+          }),
+          timeoutMs,
+          "prompt",
+          sessionID,
+        )
         return requirePrompt(unwrapData(response), sessionID)
       } catch (error) {
         if (error?.code === "OPENCODE_PROMPT_FAILED") throw error

@@ -5,6 +5,22 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-09-27
+
+### Fixed
+
+- Fixed local plugin slash-command execution so `/target` commands no longer fail with an
+  undefined handler in the generated artifact.
+- Accepted OpenCode SDK `session.deleted` events whose session ID is stored at
+  `properties.info.id`.
+- Made `/target help` use configured `command_name` and `alias` values.
+- Enforced terminal immutability for completed Targets.
+- Extended generated-plugin verification to execute the slash-command hook.
+- Added a bounded `host_api_timeout_ms` for OpenCode messages, children, and prompt calls so a
+  hanging host API cannot leave continuation in flight forever.
+- Made continuation failure handling fail-closed: typed host/provider failures pause after bounded
+  retries and unexpected continuation exceptions block the Target instead of leaving it active.
+
 ## [0.2.0] - 2026-09-24
 
 ### Changed

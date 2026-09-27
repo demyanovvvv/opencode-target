@@ -7,6 +7,9 @@ test("resolves lifecycle and session actions while preserving session ID variant
   assert.deepEqual(resolveEventAction({ type: "session.deleted", properties: { sessionID: "s" } }), {
     action: "dispose-session", sessionID: "s",
   })
+  assert.deepEqual(resolveEventAction({ type: "session.deleted", properties: { info: { id: "sdk-session" } } }), {
+    action: "dispose-session", sessionID: "sdk-session",
+  })
   assert.deepEqual(resolveEventAction({ type: "session.idle", sessionId: "s" }, true), {
     action: "process-idle", sessionID: "s",
   })

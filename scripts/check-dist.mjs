@@ -31,6 +31,12 @@ try {
   assert.equal(typeof hooks.tool.create_target?.execute, "function")
   const result = await hooks.tool.create_target.execute({ objective: "Validate generated plugin" }, { sessionID: "dist-check" })
   assert.match(result, /Validate generated plugin/)
+  const commandOutput = { parts: [{ type: "text", text: "old" }] }
+  await hooks["command.execute.before"](
+    { command: "target", sessionID: "dist-command", arguments: "help" },
+    commandOutput,
+  )
+  assert.match(commandOutput.parts[0].text, /\/target <objective>/)
   const verification = await hooks.tool.verify_target_gate.execute({ verification_id: "generated" }, { sessionID: "dist-check" })
   assert.match(verification, /Validate generated plugin/)
   assert.equal(shellCalls, 1)

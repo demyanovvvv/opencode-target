@@ -534,6 +534,9 @@ export async function setStoppedStatus(
     const target = await readTarget(stateDir, sessionID)
     if (!target) throw new Error("No Target exists for this session.")
     if (!ensureExpectedTarget(target, expectedTargetID)) return null
+    if (target.status === "complete" && status !== "complete") {
+      throw new Error("Completed Targets are immutable; start a new Target instead.")
+    }
     const at = nowMs()
     refreshClock(target, at)
 

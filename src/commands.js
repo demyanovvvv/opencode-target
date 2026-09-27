@@ -18,9 +18,6 @@ import {
   targetReport,
 } from "./core.js"
 
-const COMMAND_DEFAULT = "target"
-const ALIAS_DEFAULT = "t"
-
 function commandResultPrompt(action, target, continueNow = false, extraContext = "") {
   if (continueNow && target?.status === "active") {
     const blocks = [action, extraContext, continuationPrompt(target)].filter(Boolean)
@@ -42,6 +39,8 @@ export async function handleSlashCommand(host, $, workspaceDirectory, stateDir, 
   } = dependencies
   const client = host.adapter || host
   const parsed = parseTargetCommand(rawArguments)
+  const commandName = options.command_name || "target"
+  const aliasName = options.alias === false ? null : (options.alias || "t")
   const maxBudget = getConfiguredMaxBudget(options)
   const createOptions = {
     maxTokenBudget: maxBudget,
@@ -60,7 +59,7 @@ export async function handleSlashCommand(host, $, workspaceDirectory, stateDir, 
   if (parsed.op === "help") {
     const target = await readTarget(stateDir, sessionID)
     if (target?.status === "active") await deferNextContinuation(stateDir, sessionID, 1, target.targetID)
-    return commandResultPrompt(targetHelp(COMMAND_DEFAULT, ALIAS_DEFAULT), target, false)
+    return commandResultPrompt(targetHelp(commandName, aliasName), target, false)
   }
 
   if (parsed.op === "doctor") {
