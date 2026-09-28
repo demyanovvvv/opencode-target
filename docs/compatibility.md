@@ -7,6 +7,9 @@
 | Node.js | Node.js 22 LTS or newer supported runtime | `node --version`, CI |
 | Package format | Native ESM (`"type": "module"`) | `node --check` |
 | `@opencode-ai/plugin` | `>=1.18.30 <2.0.0` | `package.json`, CI dependency |
+| `@opencode-ai/plugin/tui` | `>=1.18.30 <2.0.0` | Generated TUI smoke test |
+| `@opentui/solid` | `>=0.4.5 <0.5.0` | TUI typecheck and renderer smoke test |
+| `solid-js` | `^1.9.12` | TUI build and renderer smoke test |
 | OpenCode plugin loading | Local plugin or package plugin configuration | OpenCode plugin docs |
 | Persisted Target schema | Versions `2` and `3` | Core migration/quarantine tests |
 
@@ -31,8 +34,13 @@ npm run check
 - Linux and macOS default Target state to `~/.local/state/opencode-target/`.
 - Windows defaults Target state to `%LOCALAPPDATA%\opencode-target\`.
 - User plugin installation uses OpenCode's plugin directory and is distinct from state storage.
+- The server plugin and TUI indicator are separate target-exclusive modules. Configure the server
+  plugin in `opencode.json` or the server plugin directory, and configure the indicator in
+  `tui.json`.
 - OpenCode exposes session events and parent/child relationships, but not every native Codex Goal
   hook. Mid-turn native steering and native metrics are therefore not equivalent.
+- The indicator uses TUI session status (`busy`, `idle`, and `retry`) plus local Target state. It
+  is intended for local OpenCode runs where the TUI and Target state directory share a machine.
 - The Target adapter accepts only the SDK's array response shape for session messages and child
   sessions. A successful response with `null`, an object, or another malformed payload is treated
   as a typed host API failure rather than as an empty list.

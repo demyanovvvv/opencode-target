@@ -7,8 +7,8 @@
 3. Update `docs/architecture.md`, `docs/state-format.md`, `docs/compatibility.md`, or
    `docs/codex-parity.md` when the corresponding behavior changes.
 4. Update the package version in `package.json` according to the release type.
-5. Review the package `files` list and confirm it contains source, generated plugin, docs, changelog,
-   and installers.
+5. Review the package `files` list and confirm it contains source, generated server and TUI plugins,
+   docs, changelog, and installers.
 
 ## Verify
 
@@ -23,8 +23,9 @@ npm run release:check
 Confirm that:
 
 - source and generated plugin pass syntax checks;
+- the generated TUI plugin passes typecheck and OpenTUI renderer smoke coverage;
 - unit tests and all smoke suites pass, including budget-wrap-up and restart recovery coverage;
-- `dist/target.js` contains the current source behavior;
+- `dist/target.js` and `dist/target-tui.js` contain the current source behavior;
 - no state files, lock files, credentials, or local configuration are packaged.
 - two consecutive local builds produce the same generated artifact hash;
 - the packed tarball installs into a temporary project and contains no tests, state, lock files, or

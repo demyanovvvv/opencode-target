@@ -148,6 +148,17 @@ An invalid prompt response is never treated as an empty assistant turn.
 
 ## Deep module seams
 
+The optional TUI companion is a separate target-exclusive entrypoint (`src/tui.tsx`, compiled to
+`dist/target-tui.js`). It contributes one `app_bottom` line so retry/permission prompts do not
+hide the indicator. Solid's reactive TUI state supplies session activity, pending permissions,
+questions, theme, route, and animation preference. `src/tui-state.js` observes only the current
+session's local persisted file at 500 ms intervals; it does not import the mutable runtime or
+invoke quarantine, accounting, continuation, or lifecycle operations. Its small read projection
+validates version/identity/status/token fields and reports unavailable state on read errors.
+Compatibility tests read files created by the real core. A session-scoped abort controller fences
+late reads, and component/plugin disposal clears polling and animation timers. Animation frames
+do not trigger file reads.
+
 `TargetRepository` owns the persistence protocol: session locks, normalized reads and writes,
 validation, quarantine, and the atomic mutation seam. Core lifecycle functions retain the public
 API and stale-write guards, but do not need to know the storage choreography. This keeps Target

@@ -17,8 +17,8 @@ Use Node.js 22 LTS or newer and install the repository dependency:
 npm install
 ```
 
-The project uses native ESM, standard Node.js modules, and `node:test`. No formatter, linter, or
-bundler is required for the source build.
+The project uses native ESM, standard Node.js modules, and `node:test`. The TUI artifact additionally
+uses the pinned OpenTUI/Solid/esbuild toolchain in `devDependencies`.
 
 ## Change workflow
 
@@ -28,6 +28,16 @@ bundler is required for the source build.
 4. Update public and operational documentation if behavior, options, paths, or recovery changes.
 5. Run `npm run check`.
 6. Inspect the generated `dist/target.js` diff when source changes are intentional.
+
+TUI-specific checks are:
+
+```text
+npm run check:tui
+npm run test:tui
+```
+
+`test:tui` uses the OpenTUI renderer through Bun because OpenTUI's native renderer is not available
+in the Node.js test process on every platform.
 
 ## Test layout
 

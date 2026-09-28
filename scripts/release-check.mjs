@@ -61,32 +61,14 @@ async function hash(file) {
 }
 
 console.log("release check: running full check")
-await runNode(["scripts/build-local.mjs"], root, { quiet: true })
-const sourceFiles = (await readdir(path.join(root, "src")))
-  .filter((name) => name.endsWith(".js"))
-  .map((name) => path.posix.join("src", name))
-for (const file of [...sourceFiles, "dist/target.js"]) {
-  await runNode(["--check", file], root, { quiet: true })
-}
-await runNode(["-e", "import('./dist/target.js').then(m => { if (typeof m.TargetPlugin !== 'function') process.exit(1) })"], root, { quiet: true })
-const unitTests = (await readdir(path.join(root, "test")))
-  .filter((name) => name.endsWith(".test.js"))
-  .map((name) => path.posix.join("test", name))
-for (const file of unitTests) {
-  await runNode(["--test", file], root, { quiet: true })
-}
-const smokeTests = (await readdir(path.join(root, "test")))
-  .filter((name) => name.endsWith("-smoke.mjs"))
-  .map((name) => path.posix.join("test", name))
-for (const file of smokeTests) {
-  await runNode([file], root, { quiet: true })
-}
-const artifact = path.join(root, "dist", "target.js")
-const firstHash = await hash(artifact)
+await runNpm(["run", "check"])
+const artifacts = ["dist/target.js", "dist/target-tui.js"]
+const firstHashes = await Promise.all(artifacts.map((file) => hash(path.join(root, file))))
 console.log("release check: verifying deterministic build")
-await runNode(["scripts/build-local.mjs"], root, { quiet: true })
-const secondHash = await hash(artifact)
-if (firstHash !== secondHash) throw new Error("Generated dist/target.js is not deterministic.")
+await runNpm(["run", "build:local"])
+for (const [index, file] of artifacts.entries()) {
+  if (firstHashes[index] !== await hash(path.join(root, file))) throw new Error(`Generated ${file} is not deterministic.`)
+}
 
 const temp = await mkdtemp(path.join(os.tmpdir(), "opencode-target-pack-"))
 let archive = null
@@ -108,6 +90,7 @@ try {
     "@opencode-ai/plugin@1.18.30",
   ], temp)
   await runNode(["-e", "import('opencode-target').then(m => { if (typeof m.TargetPlugin !== 'function') process.exit(1) })"], temp, { quiet: true })
+  await runNode(["-e", "import('node:fs/promises').then(async fs => { const file = import.meta.resolve('opencode-target/tui'); const code = await fs.readFile(new URL(file), 'utf8'); if (!code.includes('opencode-target-tui')) process.exit(1) })"], temp, { quiet: true })
   const installed = await readdir(path.join(temp, "node_modules", "opencode-target"))
   for (const required of ["README.md", "dist", "src", "docs", "install.sh", "install.ps1"]) {
     if (!installed.includes(required)) throw new Error(`Package is missing ${required}.`)

@@ -5,6 +5,15 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+### Added
+
+- Added the optional `opencode-target-tui` plugin with an animated Target status indicator near the
+  TUI prompt. It shows working, waiting, retrying, paused, blocked, budget, usage, complete, and
+  unavailable states without changing persisted Target state.
+- Added generated `dist/target-tui.js`, TUI build/typecheck/smoke commands, and installer support.
+
 ## [0.3.0] - 2026-09-27
 
 ### Fixed

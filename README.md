@@ -68,6 +68,50 @@ or, for one project:
 
 `dist/target.js` is self-contained except for the OpenCode-provided `@opencode-ai/plugin` package.
 
+### TUI indicator
+
+The repository also builds `dist/target-tui.js`, a separate OpenCode TUI plugin. It displays the
+current Target under the input area with animated working/waiting/retrying states and static icons
+for needs input, pause, blocked, budget limit, usage limit, completion, and unavailable state. It reads
+the local Target JSON without modifying or quarantining it, polls it every 500 ms, and follows the
+current TUI session. OpenCode's `animations_enabled` setting controls the animation.
+
+Configure the TUI plugin separately from the server plugin in `tui.json`:
+
+```json
+{
+  "$schema": "https://opencode.ai/tui.json",
+  "plugin": ["./tui-plugins/target.js"]
+}
+```
+
+The install scripts copy this artifact to `~/.config/opencode/tui-plugins/target.js` (or the
+equivalent Windows config directory). Add the path to `tui.json`, then restart OpenCode. The
+indicator is display-only; lifecycle control remains `/target pause`, `/target resume`, and the
+other Target commands.
+
+For a manual installation, copy `dist/target-tui.js` to the path used in `tui.json`. For one project,
+use `.opencode/tui-plugins/target.js` and `.opencode/tui.json` with the same relative-path example.
+For a locally installed package, use `"plugin": ["opencode-target"]` in `tui.json`; the package's
+`./tui` entrypoint resolves to the generated indicator.
+
+The default state directory and `OPENCODE_TARGET_STATE_DIR` match the server plugin. If the server
+uses an explicit `state_dir`, supply the same **absolute** directory to the TUI plugin:
+
+```json
+{
+  "$schema": "https://opencode.ai/tui.json",
+  "plugin": [["./tui-plugins/target.js", { "state_dir": "D:/TargetState" }]]
+}
+```
+
+On Linux/macOS use an absolute path such as `/home/me/.local/state/opencode-target`. The indicator
+uses local files and is intended for a local OpenCode instance. `waiting` means the Target is
+active but the session is idle; it does not assert that automatic continuation is enabled.
+Token figures are the last persisted accounting snapshot, not live token streaming or percentage
+of objective completion. Narrow terminals omit token figures first. The line hides when there is
+no Target or the TUI is on its home screen.
+
 The plugin installation directory and Target state directory are different locations. On Windows,
 the user plugin location is normally `%USERPROFILE%\\.config\\opencode\\plugins\\target.js`; Target
 state is stored separately under `%LOCALAPPDATA%\\opencode-target\\`. See

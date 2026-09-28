@@ -2,7 +2,7 @@
 
 ## Confirm installation
 
-1. Confirm the plugin file exists in one of OpenCode's plugin locations:
+1. Confirm the server plugin file exists in one of OpenCode's plugin locations:
 
    ```text
    ~/.config/opencode/plugins/target.js
@@ -15,9 +15,24 @@
    %USERPROFILE%\.config\opencode\plugins\target.js
    ```
 
-2. Restart OpenCode.
-3. Start a new session so the current tool list is loaded.
-4. Run `/target help`.
+2. To enable the TUI indicator, confirm `target.js` exists under the TUI plugin directory and add
+   it to `tui.json`:
+
+   ```text
+   ~/.config/opencode/tui-plugins/target.js
+   ```
+
+   ```json
+   { "$schema": "https://opencode.ai/tui.json", "plugin": ["./tui-plugins/target.js"] }
+   ```
+
+3. Restart OpenCode. TUI and server plugins are loaded at startup.
+4. Start a new session so the current tool list is loaded.
+5. Run `/target help`; the indicator appears under the prompt when the session has a Target.
+
+The TUI indicator is display-only. It polls the local state file and never performs lifecycle
+transitions or state quarantine. A missing Target hides the indicator; an unreadable state shows
+`Target · unavailable` until the next successful read.
 
 The plugin state directory is separate from the plugin installation directory. See
 `docs/state-format.md`.
