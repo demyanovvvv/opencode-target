@@ -47,6 +47,13 @@ in the Node.js test process on every platform.
 - `test/repository.test.js`: persistence repository mutation seam.
 - `test/verification.test.js`: normalized verification result contract.
 - `test/continuation.test.js`: continuation phase decisions and recheck behavior.
+- `test/install-config.test.js`: JSONC-preserving TUI registration, config precedence, and idempotence.
+- `test/install-script-smoke.mjs`: actual OS installer from isolated archive artifacts without
+  dependencies, including paths with spaces, repeat installation, and error propagation. Pass an
+  extracted package directory as the first argument to verify a release archive.
+
+`install-config.mjs` is bundled with its JSONC parser into `dist/install-config.mjs` by
+`scripts/build-install.mjs`. Install scripts run the bundle so archive users need only Node.js.
 
 Smoke suites wait on `hooks.whenIdle(sessionID)` after firing `session.idle` instead of polling
 fixed deadlines. `SchedulerState.whenIdle` resolves once the session has no in-flight run and no

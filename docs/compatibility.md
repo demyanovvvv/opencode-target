@@ -50,8 +50,10 @@ npm run check
 - OpenCode messages, children, and prompt calls are bounded by `host_api_timeout_ms` (30 seconds
   by default). A timeout is surfaced as a typed host failure and follows the same retry/lifecycle
   handling as other transient OpenCode API failures.
-- The release validation installs the pinned development target `@opencode-ai/plugin@1.18.30` into
-  a temporary project and imports the packed package before release claims are made.
+- Release validation installs `@opencode-ai/plugin@1.18.30`, OpenTUI core/solid/keymap `0.4.5`, and
+  Solid `1.9.12` into a temporary project and imports the packed package. The host's peer set is
+  pinned together so registry updates cannot select an incompatible OpenTUI generation.
+- The archive installer is also exercised without dependencies using its bundled JSONC helper.
 
 ## Upgrade policy
 

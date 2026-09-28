@@ -61,8 +61,9 @@ async function hash(file) {
 }
 
 console.log("release check: running full check")
-await runNpm(["run", "check"])
-const artifacts = ["dist/target.js", "dist/target-tui.js"]
+await runNpm(["run", "check"], root, { quiet: true })
+console.log("release check: full build, syntax, typecheck, unit, and smoke checks passed")
+const artifacts = ["dist/target.js", "dist/target-tui.js", "dist/install-config.mjs"]
 const firstHashes = await Promise.all(artifacts.map((file) => hash(path.join(root, file))))
 console.log("release check: verifying deterministic build")
 await runNpm(["run", "build:local"])
@@ -88,11 +89,17 @@ try {
     "--no-save",
     packageInfo.filename,
     "@opencode-ai/plugin@1.18.30",
+    "@opentui/core@0.4.5",
+    "@opentui/solid@0.4.5",
+    "@opentui/keymap@0.4.5",
+    "solid-js@1.9.12",
   ], temp)
   await runNode(["-e", "import('opencode-target').then(m => { if (typeof m.TargetPlugin !== 'function') process.exit(1) })"], temp, { quiet: true })
   await runNode(["-e", "import('node:fs/promises').then(async fs => { const file = import.meta.resolve('opencode-target/tui'); const code = await fs.readFile(new URL(file), 'utf8'); if (!code.includes('opencode-target-tui')) process.exit(1) })"], temp, { quiet: true })
+  await runNode(["--check", "node_modules/opencode-target/dist/install-config.mjs"], temp, { quiet: true })
+  await runNode(["test/install-script-smoke.mjs", path.join(temp, "node_modules", "opencode-target")])
   const installed = await readdir(path.join(temp, "node_modules", "opencode-target"))
-  for (const required of ["README.md", "dist", "src", "docs", "install.sh", "install.ps1"]) {
+  for (const required of ["README.md", "README.ru.md", "dist", "src", "docs", "install.sh", "install.ps1"]) {
     if (!installed.includes(required)) throw new Error(`Package is missing ${required}.`)
   }
   for (const forbidden of ["test", ".opencode", "node_modules"]) {

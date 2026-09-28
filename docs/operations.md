@@ -2,6 +2,12 @@
 
 ## Confirm installation
 
+Run `sh install.sh` or `powershell -ExecutionPolicy Bypass -File .\install.ps1` from the archive.
+Node.js 22+ is required. Both plugins and TUI registration are installed in one step, with no
+dependency installation or manual JSON editing. The generated installer bundles its JSONC parser.
+`OPENCODE_CONFIG_DIR` overrides the destination, followed by `XDG_CONFIG_HOME`; otherwise the
+destination is `~/.config/opencode`. `OPENCODE_TUI_CONFIG` selects an explicit TUI config file.
+
 1. Confirm the server plugin file exists in one of OpenCode's plugin locations:
 
    ```text
@@ -15,12 +21,14 @@
    %USERPROFILE%\.config\opencode\plugins\target.js
    ```
 
-2. To enable the TUI indicator, confirm `target.js` exists under the TUI plugin directory and add
-   it to `tui.json`:
+2. The install scripts also copy the TUI plugin and automatically register it in the global
+   `tui.json` or `tui.jsonc`. Confirm that `target.js` exists under the TUI plugin directory:
 
    ```text
    ~/.config/opencode/tui-plugins/target.js
    ```
+
+   The resulting registration is equivalent to:
 
    ```json
    { "$schema": "https://opencode.ai/tui.json", "plugin": ["./tui-plugins/target.js"] }
@@ -29,6 +37,12 @@
 3. Restart OpenCode. TUI and server plugins are loaded at startup.
 4. Start a new session so the current tool list is loaded.
 5. Run `/target help`; the indicator appears under the prompt when the session has a Target.
+
+Repeated installation preserves existing configuration and tuple options and does not append
+duplicate plugin entries. It re-enables only `opencode-target-tui` when disabled. If both
+`tui.json` and `tui.jsonc` exist, registration goes into `tui.jsonc` while considering entries from
+both. Config parse errors stop the installer with a nonzero exit; repair the indicated file and
+rerun. Files may already have been copied when configuration fails.
 
 The TUI indicator is display-only. It polls the local state file and never performs lifecycle
 transitions or state quarantine. A missing Target hides the indicator; an unreadable state shows

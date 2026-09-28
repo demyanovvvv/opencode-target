@@ -1,5 +1,9 @@
 # OpenCode Target
 
+[Русский](README.ru.md) · English
+
+[Releases](https://github.com/demyanovvvv/opencode-target/releases) · [Changelog](CHANGELOG.md)
+
 **Persistent, verified multi-turn objectives for OpenCode.**
 
 OpenCode Target is a standalone OpenCode plugin inspired by the architecture and behavior of Codex `/goal`. It is not a prompt alias. A Target is durable state with its own lifecycle, token/time accounting, automatic continuation loop, completion audit, budget enforcement, stale-write protection, and runaway-loop circuit breakers.
@@ -48,7 +52,34 @@ The model can end a turn. It cannot silently end an active Target.
 
 ## Installation
 
-### Local plugin — recommended for this archive
+### Automatic installation — recommended
+
+With Node.js 22+ installed, run one command from the extracted release archive:
+
+```sh
+sh install.sh
+```
+
+Windows:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\install.ps1
+```
+
+The installer copies **both the Target runtime and TUI indicator**, then creates or updates the
+TUI configuration automatically. No manual config edit or `npm install` is needed.
+Restart OpenCode and start a new session after installation.
+
+Existing JSON/JSONC settings, comments, and plugin options are preserved. Reinstalling updates the
+files without duplicating the TUI entry and re-enables `opencode-target-tui` if it was disabled.
+When both config files exist, registration is written to `tui.jsonc` (the higher-precedence file).
+Malformed config is reported as an installation error and is not overwritten.
+
+The destination respects `OPENCODE_CONFIG_DIR`, then `XDG_CONFIG_HOME`, then
+`~/.config/opencode`. `OPENCODE_TUI_CONFIG` selects a custom TUI config file when set; the plugin
+path is made relative to that file. Project-specific overrides still follow OpenCode's precedence.
+
+### Manual installation
 
 1. Copy `dist/target.js` into either:
 
@@ -76,7 +107,8 @@ for needs input, pause, blocked, budget limit, usage limit, completion, and unav
 the local Target JSON without modifying or quarantining it, polls it every 500 ms, and follows the
 current TUI session. OpenCode's `animations_enabled` setting controls the animation.
 
-Configure the TUI plugin separately from the server plugin in `tui.json`:
+The installer adds this TUI registration automatically. For manual installation, add it to
+`tui.json` alongside your existing settings:
 
 ```json
 {
@@ -86,9 +118,10 @@ Configure the TUI plugin separately from the server plugin in `tui.json`:
 ```
 
 The install scripts copy this artifact to `~/.config/opencode/tui-plugins/target.js` (or the
-equivalent Windows config directory). Add the path to `tui.json`, then restart OpenCode. The
-indicator is display-only; lifecycle control remains `/target pause`, `/target resume`, and the
-other Target commands.
+equivalent Windows config directory) and automatically register it in the global `tui.json` or
+`tui.jsonc`. Existing settings, comments, and plugin entries are preserved; repeating the
+installer is idempotent. Restart OpenCode after installation. The indicator is display-only;
+lifecycle control remains `/target pause`, `/target resume`, and the other Target commands.
 
 For a manual installation, copy `dist/target-tui.js` to the path used in `tui.json`. For one project,
 use `.opencode/tui-plugins/target.js` and `.opencode/tui.json` with the same relative-path example.
@@ -116,13 +149,6 @@ The plugin installation directory and Target state directory are different locat
 the user plugin location is normally `%USERPROFILE%\\.config\\opencode\\plugins\\target.js`; Target
 state is stored separately under `%LOCALAPPDATA%\\opencode-target\\`. See
 [`docs/operations.md`](docs/operations.md) and [`docs/state-format.md`](docs/state-format.md).
-
-Install scripts are available for archive installs:
-
-```text
-sh install.sh
-powershell -ExecutionPolicy Bypass -File .\\install.ps1
-```
 
 ### Package form
 

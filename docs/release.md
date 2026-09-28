@@ -2,13 +2,14 @@
 
 ## Prepare
 
-1. Review user-visible changes and update `README.md`.
+1. Review user-visible changes and update `README.md` and `README.ru.md`, including reciprocal
+   language links and installation instructions.
 2. Add the release entry to `CHANGELOG.md` and update the comparison links.
 3. Update `docs/architecture.md`, `docs/state-format.md`, `docs/compatibility.md`, or
    `docs/codex-parity.md` when the corresponding behavior changes.
 4. Update the package version in `package.json` according to the release type.
-5. Review the package `files` list and confirm it contains source, generated server and TUI plugins,
-   docs, changelog, and installers.
+5. Review the package `files` list and confirm it contains both READMEs, source, generated server
+   and TUI plugins, docs, changelog, and installers.
 
 ## Verify
 
@@ -25,11 +26,14 @@ Confirm that:
 - source and generated plugin pass syntax checks;
 - the generated TUI plugin passes typecheck and OpenTUI renderer smoke coverage;
 - unit tests and all smoke suites pass, including budget-wrap-up and restart recovery coverage;
-- `dist/target.js` and `dist/target-tui.js` contain the current source behavior;
+- `dist/target.js`, `dist/target-tui.js`, and the bundled installer helper contain the current
+  source behavior;
+- installer scripts automatically register the TUI plugin without deleting existing TUI settings;
 - no state files, lock files, credentials, or local configuration are packaged.
 - two consecutive local builds produce the same generated artifact hash;
 - the packed tarball installs into a temporary project and contains no tests, state, lock files, or
   project-local agent configuration.
+- `scripts/extract-changelog.mjs <version>` prints the intended English GitHub release description.
 
 Project-local agent skills under `.opencode/skills/` are repository guidance for maintainers and
 agents. They are intentionally not part of the package artifact; consumers use the plugin and the
@@ -53,8 +57,9 @@ Releases run through the manual `Release` GitHub Actions workflow
 For local archive distribution:
 
 1. Download the `opencode-target-<version>` workflow artifact, or run `npm pack` locally.
-2. Provide the rebuilt `dist/target.js` and the packed archive.
-3. Ensure `install.sh` and `install.ps1` point to the documented OpenCode plugin directory.
+2. Provide the packed archive containing both READMEs, `dist/target.js`, `dist/target-tui.js`, and
+   `dist/install-config.mjs` together with both install scripts.
+3. Verify install scripts copy both plugins and register the indicator without a dependency install.
 4. Tell users to restart OpenCode and create a new session.
 
 ## Post-release
