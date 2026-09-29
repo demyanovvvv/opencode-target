@@ -9,7 +9,7 @@
    `docs/codex-parity.md` when the corresponding behavior changes.
 4. Update the package version in `package.json` according to the release type.
 5. Review the package `files` list and confirm it contains both READMEs, source, generated server
-   and TUI plugins, docs, changelog, and installers.
+    and TUI plugins, docs, changelog, and English and Russian installers.
 
 ## Verify
 
@@ -29,6 +29,7 @@ Confirm that:
 - `dist/target.js`, `dist/target-tui.js`, and the bundled installer helper contain the current
   source behavior;
 - installer scripts automatically register the TUI plugin without deleting existing TUI settings;
+- English and Russian installer variants are included in the release archive and smoke-tested;
 - no state files, lock files, credentials, or local configuration are packaged.
 - two consecutive local builds produce the same generated artifact hash;
 - the packed tarball installs into a temporary project and contains no tests, state, lock files, or
@@ -58,7 +59,7 @@ For local archive distribution:
 
 1. Download the `opencode-target-<version>` workflow artifact, or run `npm pack` locally.
 2. Provide the packed archive containing both READMEs, `dist/target.js`, `dist/target-tui.js`, and
-   `dist/install-config.mjs` together with both install scripts.
+    `dist/install-config.mjs` together with all four English and Russian install scripts.
 3. Verify install scripts copy both plugins and register the indicator without a dependency install.
 4. Tell users to restart OpenCode and create a new session.
 

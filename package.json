@@ -32,7 +32,9 @@
     "LICENSE",
     "docs",
     "install.sh",
-    "install.ps1"
+    "install.ps1",
+    "install.ru.sh",
+    "install.ru.ps1"
   ],
   "keywords": [
     "opencode",

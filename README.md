@@ -52,6 +52,11 @@ The model can end a turn. It cannot silently end an active Target.
 
 ## Installation
 
+Choose the language for the installer output:
+
+- [English installation](#automatic-installation--recommended)
+- [Русская установка](README.ru.md#установка)
+
 ### Automatic installation — recommended
 
 With Node.js 22+ installed, run one command from the extracted release archive:
@@ -64,6 +69,20 @@ Windows:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\install.ps1
+```
+
+The installer prints its progress in English. To use the Russian installer instead, run:
+
+Linux/macOS:
+
+```sh
+sh install.ru.sh
+```
+
+Windows:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\install.ru.ps1
 ```
 
 The installer copies **both the Target runtime and TUI indicator**, then creates or updates the

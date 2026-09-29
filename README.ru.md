@@ -36,6 +36,11 @@ OpenCode Target — плагин для OpenCode, который сохраня�
 
 ## Установка
 
+Выберите удобный язык установщика:
+
+- [English installation](README.md#installation)
+- русская установка — инструкции ниже
+
 Требуется Node.js 22 или новее. Скачайте release archive и выполните из его каталога.
 
 ### Linux/macOS
@@ -44,10 +49,22 @@ OpenCode Target — плагин для OpenCode, который сохраня�
 sh install.sh
 ```
 
+Установщик выводит сообщения на английском. Для русских сообщений используйте:
+
+```sh
+sh install.ru.sh
+```
+
 ### Windows PowerShell
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\install.ps1
+```
+
+Русская версия PowerShell:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\install.ru.ps1
 ```
 
 Установщик автоматически:

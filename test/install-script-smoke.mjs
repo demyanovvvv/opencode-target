@@ -25,21 +25,31 @@ function run(command, args, env) {
 try {
   // Only archive artifacts are copied: there is no node_modules or source fallback here.
   await mkdir(path.join(root, "dist"), { recursive: true })
-  for (const file of ["install.ps1", "install.sh", "dist/target.js", "dist/target-tui.js", "dist/install-config.mjs"]) {
+  for (const file of ["install.ps1", "install.sh", "install.ru.ps1", "install.ru.sh", "dist/target.js", "dist/target-tui.js", "dist/install-config.mjs"]) {
     await copyFile(path.join(source, file), path.join(root, file))
   }
   const env = { ...process.env, OPENCODE_CONFIG_DIR: configDir, OPENCODE_TUI_CONFIG: "" }
-  const command = process.env.TARGET_TEST_SH || (process.platform === "win32" ? "pwsh" : "sh")
-  const args = process.platform === "win32" && !process.env.TARGET_TEST_SH
-    ? ["-NoProfile", "-File", path.join(root, "install.ps1")]
-    : [path.join(root, "install.sh")]
-  const result = await run(command, args, env)
-  assert.match(`${result.stdout}\n${result.stderr}`, /automatically|Configured TUI Target plugin/)
+  const installers = process.platform === "win32" && !process.env.TARGET_TEST_SH
+    ? [["English", "install.ps1", ["-NoProfile", "-File"]], ["Russian", "install.ru.ps1", ["-NoProfile", "-File"]]]
+    : [["English", "install.sh", []], ["Russian", "install.ru.sh", []]]
+  for (const [language, installer, prefix] of installers) {
+    const command = process.env.TARGET_TEST_SH || (process.platform === "win32" ? "pwsh" : "sh")
+    const args = [...prefix, path.join(root, installer)]
+    const result = await run(command, args, env)
+    if (language === "English") {
+      assert.match(`${result.stdout}\n${result.stderr}`, /Installed|Restart|automatically|Configured TUI Target plugin/)
+    } else {
+      assert.match(`${result.stdout}\n${result.stderr}`, /Установ|установлен|Перезапустите/i)
+    }
+  }
   const tui = JSON.parse(await readFile(path.join(configDir, "tui.json"), "utf8"))
   assert.deepEqual(tui.plugin, ["./tui-plugins/target.js"])
   assert.equal((await readFile(path.join(configDir, "plugins", "target.js"), "utf8")).includes("TargetPlugin"), true)
   assert.equal((await readFile(path.join(configDir, "tui-plugins", "target.js"), "utf8")).includes("opencode-target-tui"), true)
   const configText = await readFile(path.join(configDir, "tui.json"), "utf8")
+  const [, installer, prefix] = installers[0]
+  const command = process.env.TARGET_TEST_SH || (process.platform === "win32" ? "pwsh" : "sh")
+  const args = [...prefix, path.join(root, installer)]
   await run(command, args, env)
   assert.equal(await readFile(path.join(configDir, "tui.json"), "utf8"), configText)
   await writeFile(path.join(configDir, "tui.json"), "{ invalid")

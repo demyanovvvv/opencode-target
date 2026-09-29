@@ -25,7 +25,7 @@ let contextHooks = await readFile(path.join(root, "src/context-hooks.js"), "utf8
 let commands = await readFile(path.join(root, "src/commands.js"), "utf8")
 
 const internalize = (source) => source
-  .replace(/^import \{\n[\s\S]*?^\} from "[^"]+"\n/gm, "")
+  .replace(/^import \{\r?\n[\s\S]*?^\} from "[^"]+"\r?\n/gm, "")
   .replace(/^import [^\n]+\n/gm, "")
   .replace(/^export\s+/gm, "")
 
