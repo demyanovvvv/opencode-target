@@ -1,6 +1,6 @@
 {
   "name": "opencode-target",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "Persistent verified Target runtime for OpenCode with automatic continuation, budgets, circuit breakers, and an animated TUI status indicator.",
   "private": true,
   "type": "module",
