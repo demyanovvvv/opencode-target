@@ -4,6 +4,8 @@
 
 [Релизы](https://github.com/demyanovvvv/opencode-target/releases) · [История изменений](CHANGELOG.md)
 
+Последний релиз: **v0.5.0**
+
 **Постоянные проверяемые многошаговые цели для OpenCode.**
 
 OpenCode Target — плагин для OpenCode, который сохраняет цель отдельно от истории диалога,
@@ -41,7 +43,7 @@ OpenCode Target — плагин для OpenCode, который сохраня�
 - [English installation](README.md#installation)
 - русская установка — инструкции ниже
 
-Требуется Node.js 22 или новее. Скачайте release archive и выполните из его каталога.
+Требуется Node.js 22 или новее. Скачайте и распакуйте [архив релиза v0.5.0](https://github.com/demyanovvvv/opencode-target/releases/tag/v0.5.0), затем выполните установщик из его каталога.
 
 ### Linux/macOS
 

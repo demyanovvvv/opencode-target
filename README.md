@@ -4,6 +4,8 @@
 
 [Releases](https://github.com/demyanovvvv/opencode-target/releases) · [Changelog](CHANGELOG.md)
 
+Latest release: **v0.5.0**
+
 **Persistent, verified multi-turn objectives for OpenCode.**
 
 OpenCode Target is a standalone OpenCode plugin inspired by the architecture and behavior of Codex `/goal`. It is not a prompt alias. A Target is durable state with its own lifecycle, token/time accounting, automatic continuation loop, completion audit, budget enforcement, stale-write protection, and runaway-loop circuit breakers.
@@ -59,7 +61,7 @@ Choose the language for the installer output:
 
 ### Automatic installation — recommended
 
-With Node.js 22+ installed, run one command from the extracted release archive:
+With Node.js 22+ installed, download and extract the [v0.5.0 release archive](https://github.com/demyanovvvv/opencode-target/releases/tag/v0.5.0), then run one command from its directory:
 
 ```sh
 sh install.sh
