@@ -72,6 +72,17 @@ async function sendPrompt(client, sessionID, text) {
   }
 }
 
+async function sendPromptAsync(client, sessionID, text) {
+  void log(client.client, "debug", "Target async continuation prompt started", { sessionID, phase: "prompt" })
+  try {
+    await client.adapter.promptAsync(sessionID, text)
+    void log(client.client, "debug", "Target async continuation prompt dispatched", { sessionID, phase: "dispatched" })
+  } catch (error) {
+    void log(client.client, "warn", "Target async continuation prompt failed", { sessionID, phase: "prompt", code: error?.code, error: error?.message })
+    throw error
+  }
+}
+
 async function targetDiagnostics(client, stateDir, sessionID) {
   const checks = []
   try {
@@ -177,6 +188,7 @@ async function processIdle(scheduler, host, stateDir, sessionID, options) {
           recordTargetTurnOutcome,
           accountLiveTarget,
           sendPrompt: async (currentHost, currentSessionID, prompt) => normalizePromptResponse(await sendPrompt(currentHost, currentSessionID, prompt)),
+          sendPromptAsync: typeof host.client?.session?.promptAsync === "function" ? sendPromptAsync : null,
           continuationPrompt,
           budgetLimitPrompt,
           markBudgetWrapupSent,

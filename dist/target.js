@@ -313,6 +313,34 @@ function createOpenCodeAdapter(client, { timeoutMs = 30_000 } = {}) {
         throw failure
       }
     },
+    async promptAsync(sessionID, text) {
+      if (pendingPrompts.has(sessionID)) {
+        const error = new Error(`OpenCode prompt is still pending for session ${sessionID}; refusing an overlapping continuation.`)
+        error.code = "OPENCODE_PROMPT_PENDING"
+        throw error
+      }
+      const controller = new AbortController()
+      pendingPrompts.add(sessionID)
+      try {
+        await withTimeout(
+          () => Promise.resolve().then(() => client.session.promptAsync({
+            path: { id: sessionID },
+            body: { parts: [{ type: "text", text, synthetic: true }] },
+            signal: controller.signal,
+          })).finally(() => pendingPrompts.delete(sessionID)),
+          timeoutMs,
+          "prompt_async",
+          sessionID,
+          controller,
+        )
+      } catch (error) {
+        if (error?.code === "OPENCODE_PROMPT_FAILED" || error?.code === "OPENCODE_PROMPT_PENDING") throw error
+        const failure = new Error(`OpenCode async prompt API failed for session ${sessionID}: ${error?.message || String(error)}`)
+        failure.code = "OPENCODE_PROMPT_FAILED"
+        failure.cause = error
+        throw failure
+      }
+    },
   }
 }
 
@@ -568,6 +596,7 @@ async function runContinuationPhases({
     recordTargetTurnOutcome,
     accountLiveTarget,
     sendPrompt,
+    sendPromptAsync,
     continuationPrompt,
     budgetLimitPrompt,
     markBudgetWrapupSent,
@@ -643,6 +672,12 @@ async function runContinuationPhases({
   if (!target) return result(target, phaseContext.value, "stop", recheckDelay)
 
   phaseContext.value = "prompt"
+  if (sendPromptAsync) {
+    await sendPromptAsync(host, sessionID, continuationPrompt(target))
+    scheduler.resetRetries(sessionID, "prompt")
+    return result(target, phaseContext.value, "stop", recheckDelay)
+  }
+
   const response = await sendPrompt(host, sessionID, continuationPrompt(target))
   if (response) {
     scheduler.resetRetries(sessionID, "prompt")
@@ -748,6 +783,7 @@ function createHostSessionAdapter(client) {
     messages(sessionID) { return adapter.messages(sessionID) },
     children(sessionID) { return adapter.children(sessionID) },
     prompt(sessionID, text) { return adapter.prompt(sessionID, text) },
+    promptAsync(sessionID, text) { return adapter.promptAsync(sessionID, text) },
   }
 }
 
@@ -2397,6 +2433,17 @@ async function sendPrompt(client, sessionID, text) {
   }
 }
 
+async function sendPromptAsync(client, sessionID, text) {
+  void log(client.client, "debug", "Target async continuation prompt started", { sessionID, phase: "prompt" })
+  try {
+    await client.adapter.promptAsync(sessionID, text)
+    void log(client.client, "debug", "Target async continuation prompt dispatched", { sessionID, phase: "dispatched" })
+  } catch (error) {
+    void log(client.client, "warn", "Target async continuation prompt failed", { sessionID, phase: "prompt", code: error?.code, error: error?.message })
+    throw error
+  }
+}
+
 async function targetDiagnostics(client, stateDir, sessionID) {
   const checks = []
   try {
@@ -2502,6 +2549,7 @@ async function processIdle(scheduler, host, stateDir, sessionID, options) {
           recordTargetTurnOutcome,
           accountLiveTarget,
           sendPrompt: async (currentHost, currentSessionID, prompt) => normalizePromptResponse(await sendPrompt(currentHost, currentSessionID, prompt)),
+          sendPromptAsync: typeof host.client?.session?.promptAsync === "function" ? sendPromptAsync : null,
           continuationPrompt,
           budgetLimitPrompt,
           markBudgetWrapupSent,

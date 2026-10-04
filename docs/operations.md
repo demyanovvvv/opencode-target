@@ -44,6 +44,13 @@ duplicate plugin entries. It re-enables only `opencode-target-tui` when disabled
 both. Config parse errors stop the installer with a nonzero exit; repair the indicated file and
 rerun. Files may already have been copied when configuration fails.
 
+Rerunning an installer replaces both plugin files with the archive's versions and reports an update.
+To uninstall completely, stop OpenCode and use `sh install.sh --uninstall` or
+`powershell -ExecutionPolicy Bypass -File .\install.ps1 -Uninstall`. This removes installed Target
+files, Target entries from all global JSON/JSONC server and TUI layers (plus an explicit TUI config),
+and saved Target state. Custom tuple `state_dir` and `OPENCODE_TARGET_STATE_DIR` are also removed.
+Configuration is validated before removal; unrelated plugin files and configuration are retained.
+
 The TUI indicator is display-only. It polls the local state file and never performs lifecycle
 transitions or state quarantine. A missing Target hides the indicator; an unreadable state shows
 `Target · unavailable` until the next successful read.

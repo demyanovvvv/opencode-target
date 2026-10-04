@@ -23,6 +23,7 @@ export async function runContinuationPhases({
     recordTargetTurnOutcome,
     accountLiveTarget,
     sendPrompt,
+    sendPromptAsync,
     continuationPrompt,
     budgetLimitPrompt,
     markBudgetWrapupSent,
@@ -98,6 +99,12 @@ export async function runContinuationPhases({
   if (!target) return result(target, phaseContext.value, "stop", recheckDelay)
 
   phaseContext.value = "prompt"
+  if (sendPromptAsync) {
+    await sendPromptAsync(host, sessionID, continuationPrompt(target))
+    scheduler.resetRetries(sessionID, "prompt")
+    return result(target, phaseContext.value, "stop", recheckDelay)
+  }
+
   const response = await sendPrompt(host, sessionID, continuationPrompt(target))
   if (response) {
     scheduler.resetRetries(sessionID, "prompt")

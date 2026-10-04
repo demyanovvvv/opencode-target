@@ -73,6 +73,19 @@ Windows:
 powershell -ExecutionPolicy Bypass -File .\install.ps1
 ```
 
+### Update and uninstall
+
+Run the installer again from the newer archive to update both plugins. Existing configuration
+options and saved Targets are preserved; the installer reports `Updated` when files already exist.
+Restart OpenCode after updating.
+
+To completely uninstall, stop OpenCode, then run `sh install.sh --uninstall` on Linux/macOS or
+`powershell -ExecutionPolicy Bypass -File .\install.ps1 -Uninstall` on Windows. Russian installers
+accept the same flags. Removal deletes both plugin files, Target registrations in global server/TUI
+configuration, and saved Target state (including configured `state_dir` paths). Other plugins and
+settings are preserved. Environment overrides apply to removal as well.
+
+
 The installer prints its progress in English. To use the Russian installer instead, run:
 
 Linux/macOS:

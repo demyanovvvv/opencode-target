@@ -13,7 +13,7 @@ const client = {
   session: {
     messages: async ({ path }) => ({ data: messages.get(path.id) || [] }),
     children: async () => ({ data: [] }),
-    prompt: async ({ path }) => {
+    promptAsync: async ({ path }) => {
       promptCount += 1
       const msg = {
         info: {
@@ -31,7 +31,7 @@ const client = {
         const current = await readTarget(stateDir, path.id)
         await setStoppedStatus(stateDir, path.id, "complete", "smoke verified", current.targetID)
       }
-      return { data: msg }
+      return { data: undefined }
     },
   },
 }
@@ -42,11 +42,15 @@ try {
   await hooks["command.execute.before"]({ command: "target", sessionID: "loop", arguments: "Finish after two mocked turns" }, output)
   await hooks.event({ event: { type: "session.idle", properties: { sessionID: "loop" } } })
   await hooks.whenIdle("loop")
+  await hooks.event({ event: { type: "session.idle", properties: { sessionID: "loop" } } })
+  await hooks.whenIdle("loop")
+  await hooks.event({ event: { type: "session.idle", properties: { sessionID: "loop" } } })
+  await hooks.whenIdle("loop")
   const final = await readTarget(stateDir, "loop")
   assert.equal(promptCount, 2)
   assert.equal(final.status, "complete")
   assert.equal(final.continuationCount, 2)
-  assert.equal(final.tokensUsed, 60)
+  assert.equal(final.tokensUsed, 30)
 
   const [{ TargetPlugin: TargetPluginA }, { TargetPlugin: TargetPluginB }] = await Promise.all([
     import("../src/server.js?lease-instance=a"),
@@ -58,21 +62,11 @@ try {
     session: {
       messages: async ({ path }) => ({ data: messages.get(path.id) || [] }),
       children: async () => ({ data: [] }),
-      prompt: async ({ path }) => {
+      promptAsync: async ({ path }) => {
         competingPromptCount += 1
         const current = await readTarget(stateDir, path.id)
         await setStoppedStatus(stateDir, path.id, "complete", "single lease owner", current.targetID)
-        return { data: {
-          info: {
-            id: `competing-${competingPromptCount}`,
-            role: "assistant",
-            mode: "build",
-            agent: "build",
-            time: { created: Date.now(), completed: Date.now() },
-            tokens: { input: 1, output: 1, reasoning: 0, cache: { read: 0, write: 0 } },
-          },
-          parts: [{ type: "text", text: "completed by lease owner" }],
-        } }
+        return { data: undefined }
       },
     },
   }

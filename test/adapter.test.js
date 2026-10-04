@@ -18,6 +18,28 @@ test("timed-out prompts cancel transport and never overlap an unsettled request"
   assert.equal(calls, 1)
 })
 
+test("promptAsync dispatches without waiting for the assistant response", async () => {
+  let promptCalls = 0
+  let asyncCalls = 0
+  const adapter = createOpenCodeAdapter({ session: {
+    prompt: async () => {
+      promptCalls += 1
+      throw new Error("sync prompt must not be used")
+    },
+    promptAsync: async ({ path, body, signal }) => {
+      asyncCalls += 1
+      assert.equal(path.id, "s")
+      assert.equal(body.parts[0].text, "continue")
+      assert.equal(signal.aborted, false)
+      return { data: undefined }
+    },
+  } }, { timeoutMs: 100 })
+
+  assert.equal(await adapter.promptAsync("s", "continue"), undefined)
+  assert.equal(asyncCalls, 1)
+  assert.equal(promptCalls, 0)
+})
+
 test("prompt guard rejects concurrent calls and releases after settlement", async () => {
   let finish
   let started

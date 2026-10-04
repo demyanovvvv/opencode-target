@@ -47,7 +47,10 @@ Every asynchronous mutation carries an expected `target_id`. New Targets after c
 
 ## Scheduler boundaries
 
-`session.idle` is the durable continuation boundary. `session.prompt()` is awaited for automatic continuations, giving Target a physical-turn loop rather than an instruction for a single response to self-continue.
+`session.idle` is the durable continuation boundary. Automatic continuations use the host's
+asynchronous prompt endpoint, so the idle hook dispatches the next turn and returns immediately;
+the next `session.idle` accounts its result and decides whether to continue. Synchronous
+`session.prompt()` remains available for operations that need the completed assistant message.
 
 The adapter fences one unsettled prompt request per session. A prompt timeout aborts its transport,
 but does not release this in-memory fence until the original request settles. If cancellation is

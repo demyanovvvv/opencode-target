@@ -4,12 +4,49 @@ import os from "node:os"
 import path from "node:path"
 import test from "node:test"
 import { pathToFileURL } from "node:url"
-import { configureTuiConfig, parseJsonc, selectTuiConfigPath } from "../install-config.mjs"
+import { configureTuiConfig, parseJsonc, selectTuiConfigPath, uninstallTarget } from "../install-config.mjs"
 
 async function withConfig(fn) {
   const dir = await mkdtemp(path.join(os.tmpdir(), "opencode-target-install-"))
   try { await fn(dir) } finally { await rm(dir, { recursive: true, force: true }) }
 }
+
+test("uninstall validates configuration and state location before making changes", async () => {
+  await withConfig(async (dir) => {
+    const file = path.join(dir, "tui.json")
+    const text = '{"plugin":["./tui-plugins/target.js"]}'
+    await writeFile(file, text)
+    await assert.rejects(uninstallTarget({ configDir: dir, stateDir: dir }), /unsafe state directory/)
+    assert.equal(await readFile(file, "utf8"), text)
+    await writeFile(path.join(dir, "opencode.jsonc"), "{ invalid")
+    await assert.rejects(uninstallTarget({ configDir: dir, stateDir: path.join(dir, "state") }), /Invalid/)
+    assert.equal(await readFile(file, "utf8"), text)
+  })
+})
+
+test("uninstall removes Target files, registrations and state while preserving other plugins", async () => {
+  await withConfig(async (dir) => {
+    const stateDir = path.join(dir, "state")
+    for (const folder of ["plugins", "tui-plugins", "state"]) await mkdir(path.join(dir, folder))
+    for (const folder of ["plugins", "tui-plugins"]) {
+      await writeFile(path.join(dir, folder, "target.js"), "old target")
+      await writeFile(path.join(dir, folder, "other.js"), "keep")
+    }
+    await writeFile(path.join(stateDir, "saved.json"), "saved")
+    await writeFile(path.join(dir, "opencode.json"), JSON.stringify({ plugin: [["opencode-target", { auto_continue: true }], "other"], theme: "keep" }))
+    await writeFile(path.join(dir, "tui.jsonc"), '// keep\n{"plugin":["./tui-plugins/target.js","other"],"plugin_enabled":{"opencode-target-tui":false,"other":true}}')
+    await uninstallTarget({ configDir: dir, stateDir })
+    for (const file of ["plugins/target.js", "tui-plugins/target.js", "state/saved.json"]) {
+      await assert.rejects(readFile(path.join(dir, file)), { code: "ENOENT" })
+    }
+    assert.equal(await readFile(path.join(dir, "plugins/other.js"), "utf8"), "keep")
+    assert.deepEqual(parseJsonc(await readFile(path.join(dir, "opencode.json"), "utf8")), { plugin: ["other"], theme: "keep" })
+    const text = await readFile(path.join(dir, "tui.jsonc"), "utf8")
+    assert.match(text, /keep/)
+    assert.deepEqual(parseJsonc(text), { plugin: ["other"], plugin_enabled: { other: true } })
+    await uninstallTarget({ configDir: dir, stateDir })
+  })
+})
 
 test("installer creates tui.json and registers the indicator", async () => {
   await withConfig(async (dir) => {

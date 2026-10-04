@@ -119,5 +119,33 @@ export function createOpenCodeAdapter(client, { timeoutMs = 30_000 } = {}) {
         throw failure
       }
     },
+    async promptAsync(sessionID, text) {
+      if (pendingPrompts.has(sessionID)) {
+        const error = new Error(`OpenCode prompt is still pending for session ${sessionID}; refusing an overlapping continuation.`)
+        error.code = "OPENCODE_PROMPT_PENDING"
+        throw error
+      }
+      const controller = new AbortController()
+      pendingPrompts.add(sessionID)
+      try {
+        await withTimeout(
+          () => Promise.resolve().then(() => client.session.promptAsync({
+            path: { id: sessionID },
+            body: { parts: [{ type: "text", text, synthetic: true }] },
+            signal: controller.signal,
+          })).finally(() => pendingPrompts.delete(sessionID)),
+          timeoutMs,
+          "prompt_async",
+          sessionID,
+          controller,
+        )
+      } catch (error) {
+        if (error?.code === "OPENCODE_PROMPT_FAILED" || error?.code === "OPENCODE_PROMPT_PENDING") throw error
+        const failure = new Error(`OpenCode async prompt API failed for session ${sessionID}: ${error?.message || String(error)}`)
+        failure.code = "OPENCODE_PROMPT_FAILED"
+        failure.cause = error
+        throw failure
+      }
+    },
   }
 }

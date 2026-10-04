@@ -4,6 +4,7 @@ export function createHostSessionAdapter(client) {
     messages(sessionID) { return adapter.messages(sessionID) },
     children(sessionID) { return adapter.children(sessionID) },
     prompt(sessionID, text) { return adapter.prompt(sessionID, text) },
+    promptAsync(sessionID, text) { return adapter.promptAsync(sessionID, text) },
   }
 }
 

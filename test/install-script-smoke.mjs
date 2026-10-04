@@ -28,7 +28,7 @@ try {
   for (const file of ["install.ps1", "install.sh", "install.ru.ps1", "install.ru.sh", "dist/target.js", "dist/target-tui.js", "dist/install-config.mjs"]) {
     await copyFile(path.join(source, file), path.join(root, file))
   }
-  const env = { ...process.env, OPENCODE_CONFIG_DIR: configDir, OPENCODE_TUI_CONFIG: "" }
+  const env = { ...process.env, OPENCODE_CONFIG_DIR: configDir, OPENCODE_TUI_CONFIG: "", OPENCODE_TARGET_STATE_DIR: path.join(temp, "state") }
   const installers = process.platform === "win32" && !process.env.TARGET_TEST_SH
     ? [["English", "install.ps1", ["-NoProfile", "-File"]], ["Russian", "install.ru.ps1", ["-NoProfile", "-File"]]]
     : [["English", "install.sh", []], ["Russian", "install.ru.sh", []]]
@@ -52,6 +52,22 @@ try {
   const args = [...prefix, path.join(root, installer)]
   await run(command, args, env)
   assert.equal(await readFile(path.join(configDir, "tui.json"), "utf8"), configText)
+  for (const [, script, flags] of installers) {
+    await writeFile(path.join(configDir, "plugins", "target.js"), "outdated")
+    await writeFile(path.join(configDir, "tui-plugins", "target.js"), "outdated")
+    const update = await run(command, [...flags, path.join(root, script)], env)
+    assert.match(update.stdout, /Updated|обновлён/)
+    assert.equal(await readFile(path.join(configDir, "plugins", "target.js"), "utf8"), await readFile(path.join(root, "dist/target.js"), "utf8"))
+    await mkdir(env.OPENCODE_TARGET_STATE_DIR, { recursive: true })
+    await writeFile(path.join(env.OPENCODE_TARGET_STATE_DIR, "saved"), "saved")
+    const uninstallArg = script.endsWith(".ps1") ? "-Uninstall" : "--uninstall"
+    await run(command, [...flags, path.join(root, script), uninstallArg], env)
+    for (const file of [path.join(configDir, "plugins/target.js"), path.join(configDir, "tui-plugins/target.js"), path.join(env.OPENCODE_TARGET_STATE_DIR, "saved")]) {
+      await assert.rejects(readFile(file), { code: "ENOENT" })
+    }
+    assert.deepEqual(JSON.parse(await readFile(path.join(configDir, "tui.json"), "utf8")).plugin, [])
+    await run(command, [...flags, path.join(root, script)], env)
+  }
   await writeFile(path.join(configDir, "tui.json"), "{ invalid")
   await assert.rejects(() => run(command, args, env), /Invalid TUI config JSONC/)
   assert.equal(await readFile(path.join(configDir, "tui.json"), "utf8"), "{ invalid")
