@@ -4,7 +4,7 @@ import os from "node:os"
 import path from "node:path"
 import test from "node:test"
 import { createTarget, defaultStateDir, targetPath } from "../src/core.js"
-import { createTargetObserver, indicatorView, readIndicatorState, resolveIndicatorStateDir } from "../src/tui-state.js"
+import { createTargetObserver, indicatorView, readIndicatorState, resolveIndicatorLanguage, resolveIndicatorStateDir } from "../src/tui-state.js"
 
 const target = { version: 3, sessionID: "session", targetID: "target-1", status: "active", tokensUsed: 24800, tokenBudget: 120000 }
 const snapshot = (status = "active") => ({ kind: "target", target: { ...target, status } })
@@ -57,6 +57,26 @@ test("indicator combines lifecycle with live session activity; stopped states wi
   assert.equal(indicatorView({ kind: "missing" }), null)
   assert.equal(indicatorView({ kind: "loading" }), null)
   assert.equal(indicatorView({ kind: "unavailable" }).label, "unavailable")
+})
+
+test("indicator explains stopped states, distinguishes runtime errors, and localizes labels", () => {
+  const paused = indicatorView({ kind: "target", target: { ...target, status: "paused", stopReason: "User request" } }, {}, { language: "ru" })
+  assert.match(paused.text, /Target · Пауза/)
+  assert.match(paused.text, /\/target resume/)
+  assert.match(paused.text, /User request/)
+  const error = indicatorView({ kind: "target", target: { ...target, status: "blocked", lastError: "API\n\u001b[31mfailed" } }, {}, { language: "ru" })
+  assert.equal(error.label, "Ошибка")
+  assert.match(error.text, /API failed/)
+  assert.doesNotMatch(error.text, /\u001b|\n/)
+  assert.equal(error.intervalMs, 0)
+  assert.equal(indicatorView(snapshot("blocked")).label, "blocked")
+  assert.match(indicatorView(snapshot(), { type: "retry", attempt: 2 }, { language: "ru" }).text, /Повтор запроса · попытка 2/)
+  assert.match(indicatorView(snapshot(), { needsInput: true, permission: true }, { language: "ru" }).text, /Нужно разрешение/)
+  assert.match(indicatorView(snapshot(), { needsInput: true }, { language: "ru" }).text, /Нужен ответ/)
+  assert.match(indicatorView(snapshot(), { type: "busy" }, { language: "ru", width: 20 }).text, /Target/)
+  assert.equal(resolveIndicatorLanguage({ language: "ru" }), "ru")
+  assert.equal(resolveIndicatorLanguage({}, { LANG: "ru_RU.UTF-8" }), "ru")
+  assert.equal(resolveIndicatorLanguage({ language: "en" }, { LANG: "ru_RU" }), "en")
 })
 
 test("animation is independent from state reads and honors disabled animations", () => {

@@ -33,6 +33,8 @@ export async function readIndicatorState(stateDir, sessionID, { signal } = {}) {
       status: target.status,
       tokensUsed: target.tokensUsed ?? 0,
       tokenBudget: target.tokenBudget ?? null,
+      stopReason: target.stopReason ? String(target.stopReason) : null,
+      lastError: target.lastError ? String(target.lastError) : null,
     } }
   } catch (error) {
     return { kind: error?.code === "ENOENT" ? "missing" : "unavailable" }
@@ -41,16 +43,17 @@ export async function readIndicatorState(stateDir, sessionID, { signal } = {}) {
 
 const frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
 const states = {
-  working: { label: "working", icon: "●", color: "accent", intervalMs: 80 },
-  waiting: { label: "waiting", icon: "⋯", color: "textMuted", intervalMs: 400 },
-  retrying: { label: "retrying", icon: "↻", color: "warning", intervalMs: 400 },
-  input: { label: "needs input", icon: "?", color: "warning" },
-  paused: { label: "paused", icon: "Ⅱ", color: "warning" },
-  blocked: { label: "blocked", icon: "!", color: "error" },
-  budget_limited: { label: "budget limit", icon: "!", color: "warning" },
-  usage_limited: { label: "usage limit", icon: "!", color: "warning" },
-  complete: { label: "complete", icon: "✓", color: "success" },
-  unavailable: { label: "unavailable", icon: "?", color: "textMuted" },
+  working: { label: "working", ru: "Работает", icon: "●", color: "accent", intervalMs: 80 },
+  waiting: { label: "waiting", ru: "Ожидание", icon: "⋯", color: "textMuted", intervalMs: 400 },
+  retrying: { label: "retrying", ru: "Повтор запроса", icon: "↻", color: "warning", intervalMs: 400 },
+  input: { label: "needs input", ru: "Нужен ответ", icon: "?", color: "warning" },
+  permission: { label: "needs input", ru: "Нужно разрешение", icon: "?", color: "warning" },
+  paused: { label: "paused", ru: "Пауза", icon: "Ⅱ", color: "warning" },
+  blocked: { label: "blocked", ru: "Ошибка", icon: "!", color: "error" },
+  budget_limited: { label: "budget limit", ru: "Лимит бюджета", icon: "!", color: "warning" },
+  usage_limited: { label: "usage limit", ru: "Лимит провайдера", icon: "!", color: "warning" },
+  complete: { label: "complete", ru: "Завершено", icon: "✓", color: "success" },
+  unavailable: { label: "unavailable", ru: "Состояние недоступно", icon: "?", color: "textMuted" },
 }
 
 function compactTokens(value) {
@@ -59,24 +62,34 @@ function compactTokens(value) {
   return `${Number((value / unit).toFixed(1))}${unit === 1000 ? "k" : "M"}`
 }
 
-export function indicatorView(snapshot, activity = {}, { animations = true, frame = 0, width = 80 } = {}) {
+export function resolveIndicatorLanguage(options = {}, env = process.env) {
+  if (options.language === "ru" || options.language === "en") return options.language
+  return /^ru(?:[-_]|$)/i.test(env.LANG || env.LC_ALL || env.LC_MESSAGES || "") ? "ru" : "en"
+}
+
+function cleanDetail(value) {
+  return String(value || "").replace(/\u001b\[[0-9;]*m/g, "").replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, " ").replace(/\s+/g, " ").trim().slice(0, 120)
+}
+
+export function indicatorView(snapshot, activity = {}, { animations = true, frame = 0, width = 80, language = "en" } = {}) {
   if (!snapshot || snapshot.kind === "missing" || snapshot.kind === "loading") return null
   const target = snapshot.kind === "target" ? snapshot.target : null
   let state = target?.status ?? "unavailable"
   if (state === "active") {
-    state = activity.needsInput ? "input" : activity.type === "busy" ? "working" : activity.type === "retry" ? "retrying" : "waiting"
+    state = activity.needsInput ? (activity.permission ? "permission" : "input") : activity.type === "busy" ? "working" : activity.type === "retry" ? "retrying" : "waiting"
   }
   const display = states[state] ?? states.unavailable
   const intervalMs = animations ? display.intervalMs ?? 0 : 0
   const icon = intervalMs ? frames[frame % frames.length] : display.icon
-  const base = `${icon} Target · ${display.label}`
-  const budget = target
-    ? target.tokenBudget == null ? `${compactTokens(target.tokensUsed)} tokens` : `${compactTokens(target.tokensUsed)} / ${compactTokens(target.tokenBudget)}`
-    : null
-  const full = budget ? `${base} · ${budget}` : base
-  const text = full.length <= width ? full : base.length <= width ? base : `${icon} ${display.label}`
+  const label = language === "ru" ? display.ru : display.label
+  const reason = cleanDetail(target?.stopReason || target?.lastError)
+  const detail = state === "retrying" && activity.attempt ? (language === "ru" ? `попытка ${activity.attempt}` : `attempt ${activity.attempt}`) : state === "paused" ? ["/target resume", reason].filter(Boolean).join(" · ") : reason
+  const base = `${icon} Target · ${label}`
+  const budget = target ? target.tokenBudget == null ? `${compactTokens(target.tokensUsed)} tokens` : `${compactTokens(target.tokensUsed)} / ${compactTokens(target.tokenBudget)}` : null
+  const full = [base, detail, budget].filter(Boolean).join(" · ")
+  const text = full.length <= width ? full : base.length <= width ? base : `${icon} ${label}`
   const clipped = text.length <= width ? text : width <= 1 ? icon.slice(0, width) : `${text.slice(0, width - 1)}…`
-  return { ...display, icon, intervalMs, text: clipped }
+  return { ...display, label, icon, intervalMs, text: clipped }
 }
 
 export function createTargetObserver({ read, onChange, timers = globalThis, pollMs = 500 }) {

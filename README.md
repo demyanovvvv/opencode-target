@@ -136,8 +136,9 @@ or, for one project:
 ### TUI indicator
 
 The repository also builds `dist/target-tui.js`, a separate OpenCode TUI plugin. It displays the
-current Target under the input area with animated working/waiting/retrying states and static icons
-for needs input, pause, blocked, budget limit, usage limit, completion, and unavailable state. It reads
+current Target under the input area with clear status labels, animated working/retrying states, and static
+icons for needs input, pause, blocked, budget limit, usage limit, completion, and unavailable state. It
+also shows retry attempts and sanitized stop/error reasons when available. It reads
 the local Target JSON without modifying or quarantining it, polls it every 500 ms, and follows the
 current TUI session. OpenCode's `animations_enabled` setting controls the animation.
 

@@ -6,7 +6,7 @@ import { createTargetObserver, indicatorView, readIndicatorState, resolveIndicat
 
 const id = "opencode-target-tui"
 
-function TargetIndicator(props: { api: TuiPluginApi; stateDir: string }) {
+function TargetIndicator(props: { api: TuiPluginApi; stateDir: string; language: "en" | "ru" }) {
   const dimensions = useTerminalDimensions()
   const theme = () => props.api.theme.current
   const [snapshot, setSnapshot] = createSignal({ kind: "missing", sessionID: null })
@@ -33,6 +33,7 @@ function TargetIndicator(props: { api: TuiPluginApi; stateDir: string }) {
     if (!id) return {}
     return {
       type: props.api.state.session.status(id)?.type,
+      permission: props.api.state.session.permission(id).length > 0,
       needsInput: props.api.state.session.permission(id).length > 0 || props.api.state.session.question(id).length > 0,
     }
   })
@@ -42,6 +43,7 @@ function TargetIndicator(props: { api: TuiPluginApi; stateDir: string }) {
     animations: animations(),
     frame: frame(),
     width: Math.max(1, dimensions().width - 2),
+    language: props.language,
   }))
   const interval = createMemo(() => view()?.intervalMs ?? 0)
 
@@ -69,7 +71,7 @@ const tui: TuiPlugin = async (api, options) => {
     order: 50,
     slots: {
       app_bottom() {
-        return <TargetIndicator api={api} stateDir={stateDir} />
+        return <TargetIndicator api={api} stateDir={stateDir} language={options?.language === "ru" ? "ru" : "en"} />
       },
     },
   })
