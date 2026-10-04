@@ -60,7 +60,17 @@ async function accountLiveTarget(adapter, stateDir, sessionID, targetID, options
   return accountTargetUsage(stateDir, sessionID, samples, { expectedTargetID: targetID })
 }
 
-function sendPrompt(client, sessionID, text) { return createHostSessionAdapter(client).prompt(sessionID, text) }
+async function sendPrompt(client, sessionID, text) {
+  void log(client.client, "debug", "Target continuation prompt started", { sessionID, phase: "prompt" })
+  try {
+    const response = await createHostSessionAdapter(client).prompt(sessionID, text)
+    void log(client.client, "debug", "Target continuation prompt finished", { sessionID, phase: "post" })
+    return response
+  } catch (error) {
+    void log(client.client, "warn", "Target continuation prompt failed", { sessionID, phase: "prompt", code: error?.code, error: error?.message })
+    throw error
+  }
+}
 
 async function targetDiagnostics(client, stateDir, sessionID) {
   const checks = []
@@ -179,7 +189,10 @@ async function processIdle(scheduler, host, stateDir, sessionID, options) {
       recheckDelay = phaseResult.recheckDelay
     } catch (error) {
       accountingPhase = phaseContext.value
-      if (expectedTargetID && isTransientAccountingError(error)) {
+      if (expectedTargetID && error?.code === "OPENCODE_PROMPT_PENDING") {
+        scheduler.resetRetries(sessionID)
+        await setStoppedStatus(stateDir, sessionID, "paused", error.message.slice(0, 500), expectedTargetID).catch(() => {})
+      } else if (expectedTargetID && isTransientAccountingError(error)) {
         const retry = scheduler.nextRetry(sessionID, options.accounting_retry, accountingPhase)
         if (retry.retry) {
           shouldRecheck = true
@@ -215,6 +228,7 @@ async function processIdle(scheduler, host, stateDir, sessionID, options) {
       await log(host.client, "error", "Target idle continuation failed", {
         sessionID,
         code: error?.code || null,
+        phase: accountingPhase,
         error: String(error?.stack || error),
       })
     } finally {

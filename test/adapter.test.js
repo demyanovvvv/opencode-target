@@ -2,6 +2,42 @@ import assert from "node:assert/strict"
 import test from "node:test"
 import { createGitAdapter, createOpenCodeAdapter } from "../src/adapter.js"
 
+test("timed-out prompts cancel transport and never overlap an unsettled request", async () => {
+  let calls = 0
+  let signal
+  const adapter = createOpenCodeAdapter({ session: {
+    prompt: async (input) => {
+      calls += 1
+      signal = input.signal
+      return new Promise(() => {})
+    },
+  } }, { timeoutMs: 10 })
+  await assert.rejects(adapter.prompt("s", "continue"))
+  assert.equal(signal?.aborted, true)
+  await assert.rejects(adapter.prompt("s", "retry"), (error) => error.code === "OPENCODE_PROMPT_PENDING")
+  assert.equal(calls, 1)
+})
+
+test("prompt guard rejects concurrent calls and releases after settlement", async () => {
+  let finish
+  let started
+  const ready = new Promise((resolve) => { started = resolve })
+  const reply = { info: { id: "reply", role: "assistant" }, parts: [] }
+  const adapter = createOpenCodeAdapter({ session: { prompt: () => {
+    started()
+    return new Promise((resolve) => { finish = resolve })
+  } } })
+  const first = adapter.prompt("s", "first")
+  await ready
+  await assert.rejects(adapter.prompt("s", "second"), (error) => error.code === "OPENCODE_PROMPT_PENDING")
+  finish({ data: reply })
+  assert.deepEqual(await first, reply)
+  const next = adapter.prompt("s", "next")
+  await Promise.resolve()
+  finish({ data: reply })
+  assert.deepEqual(await next, reply)
+})
+
 test("Git adapter builds a stable fingerprint from HEAD and porcelain status", async () => {
   const calls = []
   const git = createGitAdapter({

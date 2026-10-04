@@ -22,7 +22,7 @@ function requirePrompt(value, sessionID) {
   throw error
 }
 
-async function withTimeout(operation, timeoutMs, endpoint, sessionID) {
+async function withTimeout(operation, timeoutMs, endpoint, sessionID, controller = null) {
   const limit = Number(timeoutMs)
   if (!Number.isFinite(limit) || limit <= 0) return operation()
   let timer
@@ -31,6 +31,7 @@ async function withTimeout(operation, timeoutMs, endpoint, sessionID) {
       operation(),
       new Promise((_, reject) => {
         timer = setTimeout(() => {
+          controller?.abort()
           const error = new Error(`OpenCode ${endpoint} API timed out after ${limit}ms for session ${sessionID}.`)
           error.code = "OPENCODE_HOST_TIMEOUT"
           reject(error)
@@ -53,6 +54,7 @@ export function createGitAdapter({ exec = execFileAsync } = {}) {
 }
 
 export function createOpenCodeAdapter(client, { timeoutMs = 30_000 } = {}) {
+  const pendingPrompts = new Set()
   return {
     async messages(sessionID) {
       try {
@@ -89,19 +91,28 @@ export function createOpenCodeAdapter(client, { timeoutMs = 30_000 } = {}) {
       }
     },
     async prompt(sessionID, text) {
+      if (pendingPrompts.has(sessionID)) {
+        const error = new Error(`OpenCode prompt is still pending for session ${sessionID}; refusing an overlapping continuation.`)
+        error.code = "OPENCODE_PROMPT_PENDING"
+        throw error
+      }
+      const controller = new AbortController()
+      pendingPrompts.add(sessionID)
       try {
         const response = await withTimeout(
-          () => client.session.prompt({
+          () => Promise.resolve().then(() => client.session.prompt({
             path: { id: sessionID },
             body: { parts: [{ type: "text", text, synthetic: true }] },
-          }),
+            signal: controller.signal,
+          })).finally(() => pendingPrompts.delete(sessionID)),
           timeoutMs,
           "prompt",
           sessionID,
+          controller,
         )
         return requirePrompt(unwrapData(response), sessionID)
       } catch (error) {
-        if (error?.code === "OPENCODE_PROMPT_FAILED") throw error
+        if (error?.code === "OPENCODE_PROMPT_FAILED" || error?.code === "OPENCODE_PROMPT_PENDING") throw error
         const failure = new Error(`OpenCode prompt API failed for session ${sessionID}: ${error?.message || String(error)}`)
         failure.code = "OPENCODE_PROMPT_FAILED"
         failure.cause = error

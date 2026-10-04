@@ -95,6 +95,17 @@ Provider prompt failures follow the same fail-closed rule. Typed OpenCode prompt
 the Target after bounded retries; unexpected continuation exceptions block it with a bounded
 diagnostic reason. Neither path leaves an active Target eligible for an uncontrolled retry loop.
 
+Prompt timeouts signal transport cancellation using the SDK's `AbortSignal`. Cancellation of
+the request does not prove that OpenCode stopped its server-side turn. Until the original request
+settles, Target refuses overlapping prompts and pauses with `OPENCODE_PROMPT_PENDING` rather than
+retrying into an unknown running turn. The scheduler lease is released when this processing ends.
+Check the `opencode-target` log entries `Target continuation prompt started`, `finished`, and
+`failed`, including `sessionID`, `phase`, and error code. These entries do not include prompt text.
+If the TUI cannot accept commands or Ctrl-C, restart OpenCode and inspect its logs before resuming.
+The Orca status alone is not evidence that the session is making progress. Isolate server and TUI
+plugins in a separate configuration to establish a conflict; no specific third-party conflict is
+currently confirmed.
+
 If an OpenCode process exits while owning continuation, its persisted scheduler lease becomes
 recoverable after `scheduler_lease_ms` (30 seconds by default). A later `session.idle` event can
 then acquire the expired lease. Do not place the state directory on a shared network filesystem;

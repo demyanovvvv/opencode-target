@@ -49,6 +49,11 @@ Every asynchronous mutation carries an expected `target_id`. New Targets after c
 
 `session.idle` is the durable continuation boundary. `session.prompt()` is awaited for automatic continuations, giving Target a physical-turn loop rather than an instruction for a single response to self-continue.
 
+The adapter fences one unsettled prompt request per session. A prompt timeout aborts its transport,
+but does not release this in-memory fence until the original request settles. If cancellation is
+ignored, a subsequent continuation is refused with `OPENCODE_PROMPT_PENDING` and runtime pauses
+the Target, releases its scheduler lease, and leaves the durable objective intact.
+
 ## Plugin configuration boundary
 
 `normalizePluginOptions` owns validation and defaulting for the public plugin configuration. The

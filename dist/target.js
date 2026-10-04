@@ -216,7 +216,7 @@ function requirePrompt(value, sessionID) {
   throw error
 }
 
-async function withTimeout(operation, timeoutMs, endpoint, sessionID) {
+async function withTimeout(operation, timeoutMs, endpoint, sessionID, controller = null) {
   const limit = Number(timeoutMs)
   if (!Number.isFinite(limit) || limit <= 0) return operation()
   let timer
@@ -225,6 +225,7 @@ async function withTimeout(operation, timeoutMs, endpoint, sessionID) {
       operation(),
       new Promise((_, reject) => {
         timer = setTimeout(() => {
+          controller?.abort()
           const error = new Error(`OpenCode ${endpoint} API timed out after ${limit}ms for session ${sessionID}.`)
           error.code = "OPENCODE_HOST_TIMEOUT"
           reject(error)
@@ -247,6 +248,7 @@ function createGitAdapter({ exec = execFileAsync } = {}) {
 }
 
 function createOpenCodeAdapter(client, { timeoutMs = 30_000 } = {}) {
+  const pendingPrompts = new Set()
   return {
     async messages(sessionID) {
       try {
@@ -283,19 +285,28 @@ function createOpenCodeAdapter(client, { timeoutMs = 30_000 } = {}) {
       }
     },
     async prompt(sessionID, text) {
+      if (pendingPrompts.has(sessionID)) {
+        const error = new Error(`OpenCode prompt is still pending for session ${sessionID}; refusing an overlapping continuation.`)
+        error.code = "OPENCODE_PROMPT_PENDING"
+        throw error
+      }
+      const controller = new AbortController()
+      pendingPrompts.add(sessionID)
       try {
         const response = await withTimeout(
-          () => client.session.prompt({
+          () => Promise.resolve().then(() => client.session.prompt({
             path: { id: sessionID },
             body: { parts: [{ type: "text", text, synthetic: true }] },
-          }),
+            signal: controller.signal,
+          })).finally(() => pendingPrompts.delete(sessionID)),
           timeoutMs,
           "prompt",
           sessionID,
+          controller,
         )
         return requirePrompt(unwrapData(response), sessionID)
       } catch (error) {
-        if (error?.code === "OPENCODE_PROMPT_FAILED") throw error
+        if (error?.code === "OPENCODE_PROMPT_FAILED" || error?.code === "OPENCODE_PROMPT_PENDING") throw error
         const failure = new Error(`OpenCode prompt API failed for session ${sessionID}: ${error?.message || String(error)}`)
         failure.code = "OPENCODE_PROMPT_FAILED"
         failure.cause = error
@@ -2374,7 +2385,17 @@ async function accountLiveTarget(adapter, stateDir, sessionID, targetID, options
   return accountTargetUsage(stateDir, sessionID, samples, { expectedTargetID: targetID })
 }
 
-function sendPrompt(client, sessionID, text) { return createHostSessionAdapter(client).prompt(sessionID, text) }
+async function sendPrompt(client, sessionID, text) {
+  void log(client.client, "debug", "Target continuation prompt started", { sessionID, phase: "prompt" })
+  try {
+    const response = await createHostSessionAdapter(client).prompt(sessionID, text)
+    void log(client.client, "debug", "Target continuation prompt finished", { sessionID, phase: "post" })
+    return response
+  } catch (error) {
+    void log(client.client, "warn", "Target continuation prompt failed", { sessionID, phase: "prompt", code: error?.code, error: error?.message })
+    throw error
+  }
+}
 
 async function targetDiagnostics(client, stateDir, sessionID) {
   const checks = []
@@ -2493,7 +2514,10 @@ async function processIdle(scheduler, host, stateDir, sessionID, options) {
       recheckDelay = phaseResult.recheckDelay
     } catch (error) {
       accountingPhase = phaseContext.value
-      if (expectedTargetID && isTransientAccountingError(error)) {
+      if (expectedTargetID && error?.code === "OPENCODE_PROMPT_PENDING") {
+        scheduler.resetRetries(sessionID)
+        await setStoppedStatus(stateDir, sessionID, "paused", error.message.slice(0, 500), expectedTargetID).catch(() => {})
+      } else if (expectedTargetID && isTransientAccountingError(error)) {
         const retry = scheduler.nextRetry(sessionID, options.accounting_retry, accountingPhase)
         if (retry.retry) {
           shouldRecheck = true
@@ -2529,6 +2553,7 @@ async function processIdle(scheduler, host, stateDir, sessionID, options) {
       await log(host.client, "error", "Target idle continuation failed", {
         sessionID,
         code: error?.code || null,
+        phase: accountingPhase,
         error: String(error?.stack || error),
       })
     } finally {

@@ -502,7 +502,7 @@ Each session has one JSON state file. Writes use a per-session file lock plus te
 | Option | Default | Meaning |
 |---|---:|---|
 | `auto_continue` | `true` | Automatically create another physical turn when an active Target becomes idle |
-| `host_api_timeout_ms` | `30000` | Maximum time for an OpenCode messages, children, or prompt API call before it becomes a retryable host failure |
+| `host_api_timeout_ms` | `30000` | Maximum time for a host API call; prompt timeouts signal transport cancellation. An unsettled previous prompt pauses Target instead of allowing overlapping continuations |
 | `max_target_token_budget` | none | Maximum and default budget for newly created Targets, matching Codex's `max_goal_token_budget` behavior |
 | `min_continue_interval_ms` | `250` | Minimum interval between automatic continuations |
 | `failed_exec_threshold` | `3` | Consecutive qualifying failed-exec Target turns before runtime block |

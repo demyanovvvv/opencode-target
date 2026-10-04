@@ -184,6 +184,32 @@ try {
   assert.equal(malformedPromptAttempts, 2)
   assert.equal(malformedPromptTarget.status, "paused")
   assert.match(malformedPromptTarget.stopReason, /^Continuation host API unavailable after 2 attempts:/)
+  let hangingCalls = 0
+  let hangingSignal
+  const hangingHooks = await TargetPlugin({ client: {
+    app: client.app,
+    session: {
+      messages: async () => ({ data: [] }),
+      children: async () => ({ data: [] }),
+      prompt: async ({ signal }) => {
+        hangingCalls += 1
+        hangingSignal = signal
+        return new Promise(() => {})
+      },
+    },
+  } }, { state_dir: stateDir, host_api_timeout_ms: 10,
+    accounting_retry: { maxAttempts: 3, baseDelayMs: 10, maxDelayMs: 10 } })
+  await hangingHooks.tool.create_target.execute({ objective: "Do not overlap a hanging request" }, { sessionID: "hanging" })
+  await hangingHooks.event({ event: { type: "session.idle", properties: { sessionID: "hanging" } } })
+  await hangingHooks.event({ event: { type: "session.idle", properties: { sessionID: "hanging" } } })
+  await hangingHooks.whenIdle("hanging")
+  const hangingTarget = await readTarget(stateDir, "hanging")
+  assert.equal(hangingCalls, 1)
+  assert.equal(hangingSignal.aborted, true)
+  assert.equal(hangingTarget.status, "paused")
+  assert.equal(hangingTarget.schedulerLease, null)
+  assert.match(hangingTarget.stopReason, /still pending/)
+  await hangingHooks.event({ event: { type: "server.instance.disposed" } })
   console.log("continuation smoke: ok")
 } finally {
   await rm(stateDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 25 })
