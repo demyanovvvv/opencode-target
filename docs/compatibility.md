@@ -21,12 +21,10 @@ OpenCode 1.18.34. Target installation/update does not build or replace OpenCode.
 plugin remains independently usable. SDK 1.18.30 is the pinned test dependency; the declared
 peer range is not a claim that every subsequent host version has been exercised.
 
-Target is registered with `requiresHost: false`. A manifest recording a previously installed
-`+target` host triggers a one-time coordinated migration: Target's custom prompt seam is removed,
-and any host extensions required by Patchline are preserved. Migration uses the existing guarded
-binary replacement/rollback mechanism and requires its Git/Bun/native build dependencies.
-New stock installations do not need those dependencies. Existing untracked custom binaries are
-not automatically replaced merely because their displayed version contains a suffix.
+Target installation requires Node.js 22+ and installs only plugin files and configuration.
+It does not inspect shared component manifests or build, migrate, or replace host binaries.
+Existing custom OpenCode installations remain unchanged; reinstall stock OpenCode separately
+if desired. Git, Bun, and native compilation tools are not required to install Target.
 
 ## Local environment note
 

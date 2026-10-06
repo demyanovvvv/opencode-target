@@ -8,12 +8,10 @@ dependency installation or manual JSON editing. The generated installer bundles 
 `OPENCODE_CONFIG_DIR` overrides the destination, followed by `XDG_CONFIG_HOME`; otherwise the
 destination is `~/.config/opencode`. `OPENCODE_TUI_CONFIG` selects an explicit TUI config file.
 
-The indicator uses stock `session_prompt_right` (upstream 1.18.34). New installations and
-updates leave the OpenCode executable untouched. If `host-components.json` records an installed
-`+target` host, installation performs one guarded migration removing Target's host patch while
-preserving peer extensions; build failures roll back plugin/config files and the executable.
-That legacy migration requires Git, Bun, and native build dependencies. Preserve the manifest
-when upgrading so the installer can distinguish tracked legacy hosts from unrelated binaries.
+The indicator uses stock `session_prompt_right` (upstream 1.18.34). Installation, updates and
+removal leave the OpenCode executable and unrelated extension metadata untouched. Existing
+custom OpenCode installations are not migrated; reinstall stock OpenCode separately if desired.
+Installer file/config changes are protected by `.target-install.lock` and rolled back on failure.
 
 1. Confirm the server plugin file exists in one of OpenCode's plugin locations:
 

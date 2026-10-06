@@ -15,5 +15,5 @@ Thumbs.db
 .idea/
 .vscode/
 
-# Local OpenCode host build
+# Archived local development checkout
 .opencode-host/
