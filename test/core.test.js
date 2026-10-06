@@ -25,6 +25,7 @@ import {
   pauseTarget,
   readTarget,
   recordTargetTurnOutcome,
+  recordTargetTurnOutcomes,
   releaseSchedulerLease,
   renewSchedulerLease,
   resumeTarget,
@@ -764,4 +765,30 @@ test("retry policy normalizes bounds and classifies only transient failures", ()
   assert.equal(isRetryableVerificationFailure({ code: "ETIMEDOUT" }), true)
   assert.equal(isRetryableVerificationFailure({ code: "ENOENT" }), false)
   assert.equal(isRetryableVerificationFailure(new Error("connection reset by peer")), true)
+})
+
+test("async continuation outcomes retain automatic classification after reload", async () => {
+  await withState(async (dir) => {
+    const target = await createTarget(dir, "async", "finish")
+    await markContinuationStarted(dir, "async", target.targetID)
+    const pending = await readTarget(dir, "async")
+    assert.ok(pending.runtime.pendingAutomaticAtMs)
+    const message = assistant("automatic-empty", { created: pending.runtime.pendingAutomaticAtMs + 1 })
+    const next = await recordTargetTurnOutcome(dir, "async", message, { expectedTargetID: target.targetID })
+    assert.equal(next.runtime.emptyAutomaticStreak, 1)
+    assert.equal(next.runtime.lastTurnClassification.automatic, true)
+    assert.equal(next.runtime.pendingAutomaticAtMs, null)
+  })
+})
+
+test("completion watermark prevents replay beyond 500 assistant IDs", async () => {
+  await withState(async (dir) => {
+    const target = await createTarget(dir, "long", "finish")
+    const messages = Array.from({ length: 520 }, (_, i) => assistant(`m-${i}`, { created: target.createdAtMs + i + 1, parts: [{ type: "text", text: "progress" }] }))
+    const next = await recordTargetTurnOutcomes(dir, "long", messages, { expectedTargetID: target.targetID })
+    assert.equal(next.runtime.evaluatedAssistantMessageIDs.length, 500)
+    assert.equal(next.runtime.lastTurnClassification.assistantMessageID, "m-519")
+    const replay = await recordTargetTurnOutcome(dir, "long", messages[0], { expectedTargetID: target.targetID })
+    assert.equal(replay.runtime.lastTurnClassification.assistantMessageID, "m-519")
+  })
 })

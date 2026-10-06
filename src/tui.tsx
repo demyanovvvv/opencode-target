@@ -6,16 +6,13 @@ import { createTargetObserver, indicatorView, readIndicatorState, resolveIndicat
 
 const id = "opencode-target-tui"
 
-function TargetIndicator(props: { api: TuiPluginApi; stateDir: string; language: "en" | "ru"; width?: number }) {
+function TargetIndicator(props: { api: TuiPluginApi; stateDir: string; sessionID: string; language: "en" | "ru"; width?: number }) {
   const dimensions = useTerminalDimensions()
   const theme = () => props.api.theme.current
   const [snapshot, setSnapshot] = createSignal({ kind: "missing", sessionID: null })
   const [disposed, setDisposed] = createSignal(false)
   const [frame, setFrame] = createSignal(0)
-  const sessionID = createMemo(() => {
-    const route = props.api.route.current
-    return route.name === "session" && typeof route.params?.sessionID === "string" ? route.params.sessionID : null
-  })
+  const sessionID = createMemo(() => props.sessionID)
   const observer = createTargetObserver({
     read: (sessionID, context) => readIndicatorState(props.stateDir, sessionID, context),
     onChange: setSnapshot,
@@ -56,7 +53,7 @@ function TargetIndicator(props: { api: TuiPluginApi; stateDir: string; language:
 
   return (
     <box flexDirection="row" gap={1} height={view()?.text ? 1 : 0} flexShrink={0}>
-      <Show when={view()}>
+      <Show when={view()?.text ? view() : null}>
         {(value) => <><text fg={theme().textMuted}>│</text><text fg={theme()[value().color]} wrapMode="none">{value().text}</text></>}
       </Show>
     </box>
@@ -65,11 +62,11 @@ function TargetIndicator(props: { api: TuiPluginApi; stateDir: string; language:
 
 const tui: TuiPlugin = async (api, options) => {
   const stateDir = resolveIndicatorStateDir(options)
-  api.slots.register<{ session_prompt_status: { session_id: string; width: number } }>({
+  api.slots.register({
     order: 50,
     slots: {
-      session_prompt_status(_context, input) {
-        return <TargetIndicator api={api} stateDir={stateDir} width={input.width} language={options?.language === "ru" ? "ru" : "en"} />
+      session_prompt_right(_context, input) {
+        return <TargetIndicator api={api} stateDir={stateDir} sessionID={input.session_id} language={options?.language === "ru" ? "ru" : "en"} />
       },
     },
   })

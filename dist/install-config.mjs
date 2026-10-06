@@ -1719,7 +1719,7 @@ async function withHostLock(configDir, operation, { timeout = 12e4 } = {}) {
 }
 function hostVersion(upstream, components) {
   if (!versionPattern.test(upstream)) throw new Error("Invalid upstream version");
-  return upstream + names.filter((name) => components[name]).map((name) => {
+  return upstream + names.filter((name) => components[name] && components[name].requiresHost !== false).map((name) => {
     const version = components[name].version;
     if (!versionPattern.test(version)) throw new Error(`Invalid ${name} version`);
     return `+${name}.${version}`;
@@ -1874,20 +1874,6 @@ function transformHostFile(kind, source, components, coordinator = "", configDir
     source = source.slice(0, start) + block + source.slice(end);
     if (!source.includes("import { usePluginRuntime }")) source = 'import { usePluginRuntime } from "../../plugin/runtime"\n' + source;
   }
-  if (kind === "prompt" && components.target) {
-    source = replace(source, 'import { useProject } from "../../context/project"', 'import { useProject } from "../../context/project"\nimport { usePluginRuntime } from "../../plugin/runtime"');
-    source = replace(source, "export function Prompt(props: PromptProps) {", "export function Prompt(props: PromptProps) {\n  const pluginRuntime = usePluginRuntime()");
-    const start = source.indexOf('<box width="100%" flexDirection="row" justifyContent="space-between">');
-    const end = source.indexOf('<Show when={status().type !== "retry"}>', start);
-    if (start < 0 || end < 0) throw new Error("Unsupported OpenCode prompt status row");
-    let block = source.slice(start, end);
-    block = replace(block, '<box width="100%" flexDirection="row" justifyContent="space-between">', '<box width="100%" flexDirection="row" justifyContent="space-between">\n          <box flexDirection="row" gap={1} flexGrow={1} flexShrink={1} overflow="hidden">');
-    block = replace(block, 'flexGrow={1}\n                justifyContent={status().type === "retry" ? "space-between" : "flex-start"}', 'flexShrink={0}\n                justifyContent="flex-start"');
-    const closing = block.lastIndexOf("</Switch>");
-    if (closing < 0) throw new Error("Unsupported OpenCode prompt status switch");
-    block = block.slice(0, closing) + block.slice(closing).replace("</Switch>", '</Switch>\n          <Show when={props.sessionID}>\n            <pluginRuntime.Slot name="session_prompt_status" session_id={props.sessionID!} width={Math.max(0, Math.min(36, dimensions().width - 58))} />\n          </Show>\n          </box>');
-    source = source.slice(0, start) + block + source.slice(end);
-  }
   if (kind === "installation") {
     source = replace(source, "semver.major(current)", 'semver.major(current.split("+")[0]!)');
     source = replace(source, "semver.minor(current)", 'semver.minor(current.split("+")[0]!)');
@@ -1920,6 +1906,7 @@ async function runHostCommand(command, args, cwd, env = {}) {
   });
 }
 async function buildHost({ upstream, components, configDir, coordinator }) {
+  components = Object.fromEntries(Object.entries(components).filter(([, component]) => component.requiresHost !== false));
   hostVersion(upstream, components);
   const host = path2.join(configDir, "host-build", upstream);
   await mkdir2(path2.dirname(host), { recursive: true });
@@ -2188,6 +2175,13 @@ async function installTargetFiles({ configDir, root, tuiConfig = null, uninstall
       }
     }
     try {
+      let legacyTargetHost = false;
+      try {
+        const manifest2 = JSON.parse(await readFile4(path4.join(configDir, "host-components.json"), "utf8"));
+        legacyTargetHost = /\+target\./.test(manifest2.host?.version || "");
+      } catch (error) {
+        if (error.code !== "ENOENT") throw error;
+      }
       if (uninstall) {
         const quarantine = path4.join(configDir, `.target-state-transition-${process.pid}`);
         await uninstallTarget({ configDir, tuiConfig, stateDir: quarantine, locked: true });
@@ -2200,9 +2194,9 @@ async function installTargetFiles({ configDir, root, tuiConfig = null, uninstall
         const version = true ? "0.5.0" : JSON.parse(await readFile4(path4.join(root, "package.json"), "utf8")).version;
         await mkdir4(path4.join(configDir, "target"), { recursive: true });
         await writeFile4(path4.join(configDir, "target/package.json"), JSON.stringify({ name: "opencode-target", version }) + "\n");
-        await registerComponentLocked(configDir, "target", { version, files: ["plugins/target.js", "tui-plugins/target.js", "target/package.json"], packageFile: "target/package.json", registration: "opencode-target" });
+        await registerComponentLocked(configDir, "target", { version, requiresHost: false, files: ["plugins/target.js", "tui-plugins/target.js", "target/package.json"], packageFile: "target/package.json", registration: "opencode-target" });
       }
-      await hostInstaller(configDir, upstream);
+      if (legacyTargetHost) await hostInstaller(configDir, upstream);
       if (uninstall) {
         await rm3(path4.join(configDir, "target/package.json"), { force: true });
         await uninstallTarget({ configDir, tuiConfig, stateDir, locked: true });

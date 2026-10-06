@@ -8,10 +8,10 @@ export function isAccountableTarget(target) {
   return Boolean(target && ACCOUNTABLE_STATUSES.has(target.status))
 }
 
-export async function accountToolBoundary({ stateDir, sessionID, readTarget, listMessages, accountTargetUsage }) {
+export async function accountToolBoundary({ stateDir, sessionID, readTarget, listMessages, accountTargetUsage, incrementalMessages }) {
   const target = await readTarget(stateDir, sessionID)
   if (!isAccountableTarget(target)) return null
-  const messages = await listMessages(sessionID)
+  const messages = incrementalMessages ?? await listMessages(sessionID)
   return accountTargetUsage(
     stateDir,
     sessionID,

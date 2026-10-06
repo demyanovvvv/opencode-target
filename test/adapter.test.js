@@ -148,3 +148,22 @@ test("OpenCode adapter rejects malformed prompt success payloads", async () => {
     (error) => error.code === "OPENCODE_PROMPT_FAILED" && /expected an assistant message/.test(error.message),
   )
 })
+test("promptAsync rejects resolved SDK HTTP failures", async () => {
+  const adapter = createOpenCodeAdapter({ session: {
+    promptAsync: async () => ({ error: { message: "missing session" }, response: { ok: false, status: 404 } }),
+  } })
+  await assert.rejects(adapter.promptAsync("missing", "continue"), (error) => error.code === "OPENCODE_PROMPT_FAILED")
+})
+
+test("concurrent message reads share transport but settled reads stay fresh", async () => {
+  let calls = 0
+  const adapter = createOpenCodeAdapter({ session: { messages: async () => {
+    calls += 1
+    await new Promise((resolve) => setTimeout(resolve, 5))
+    return { data: [] }
+  } } })
+  await Promise.all([adapter.messages("s"), adapter.messages("s")])
+  assert.equal(calls, 1)
+  await adapter.messages("s")
+  assert.equal(calls, 2)
+})

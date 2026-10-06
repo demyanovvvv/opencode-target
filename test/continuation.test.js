@@ -67,3 +67,19 @@ test("runContinuationPhases returns a recheck decision for a deferred continuati
   assert.equal(result.recheckDelay, 200)
   assert.equal(result.phase, "pre")
 })
+
+test("idle only classifies completed new messages and reuses root history", async () => {
+  const calls = []
+  const messages = [
+    { info: { id: "old", role: "assistant", time: { created: 1, completed: 2 } } },
+    { info: { id: "new", role: "assistant", time: { created: 3, completed: 4 } } },
+    { info: { id: "streaming", role: "assistant", time: { created: 5 } } },
+  ]
+  const target = { targetID: "t", status: "active", runtime: { evaluatedAssistantMessageIDs: ["old"], evaluatedThroughMs: 2 } }
+  await runContinuationPhases({ scheduler: { resetRetries() {} }, host: {}, stateDir: "s", sessionID: "s", target, expectedTargetID: "t", options: { min_continue_interval_ms: 0 }, operations: baseOperations({
+    listMessages: async () => messages,
+    recordTargetTurnOutcome: async (_dir, _id, message) => { calls.push(message.info.id); return target },
+    accountLiveTarget: async (_host, _dir, _id, _target, _options, rootMessages) => { assert.equal(rootMessages, messages); return { ...target, status: "complete" } },
+  }) })
+  assert.deepEqual(calls, ["new"])
+})

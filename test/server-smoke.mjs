@@ -216,6 +216,23 @@ try {
   assert.equal(unexpectedFailureTarget.status, "paused")
   assert.match(unexpectedFailureTarget.stopReason, /Continuation host API unavailable/)
 
+  let streamedHistoryCalls = 0
+  const streamedHooks = await TargetPlugin({ client: { app: client.app, session: {
+    messages: async () => { streamedHistoryCalls += 1; return { data: [] } },
+    children: async () => ({ data: [] }),
+  } } }, { state_dir: stateDir })
+  const streamed = await createTarget(stateDir, "streamed", "Account incremental tokens", 100)
+  await streamedHooks.event({ event: { type: "message.updated", properties: { info: {
+    id: "streamed-message", sessionID: "streamed", role: "assistant",
+    time: { created: streamed.createdAtMs + 1 }, tokens: { input: 10, output: 5 },
+  } } } })
+  await streamedHooks["tool.execute.after"]({ sessionID: "streamed" })
+  assert.equal((await readTarget(stateDir, "streamed")).tokensUsed, 15)
+  assert.equal(streamedHistoryCalls, 0)
+  await streamedHooks["tool.execute.after"]({ sessionID: "streamed" })
+  assert.equal((await readTarget(stateDir, "streamed")).tokensUsed, 15)
+  assert.equal(streamedHistoryCalls, 0)
+  await streamedHooks.event({ event: { type: "server.instance.disposed" } })
   console.log("server smoke: ok")
 } finally {
   await rm(stateDir, { recursive: true, force: true })

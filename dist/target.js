@@ -249,14 +249,19 @@ function createGitAdapter({ exec = execFileAsync } = {}) {
 
 function createOpenCodeAdapter(client, { timeoutMs = 30_000 } = {}) {
   const pendingPrompts = new Set()
+  const pendingMessages = new Map()
   return {
     async messages(sessionID) {
+      if (pendingMessages.has(sessionID)) return pendingMessages.get(sessionID)
+      const operation = (async () => {
+      const controller = new AbortController()
       try {
         const data = unwrapData(await withTimeout(
-          () => client.session.messages({ path: { id: sessionID } }),
+          () => client.session.messages({ path: { id: sessionID }, signal: controller.signal }),
           timeoutMs,
           "messages",
           sessionID,
+          controller,
         ))
         return requireArray(data, "messages", sessionID)
       } catch (error) {
@@ -266,6 +271,15 @@ function createOpenCodeAdapter(client, { timeoutMs = 30_000 } = {}) {
         failure.cause = error
         throw failure
       }
+      })()
+      pendingMessages.set(sessionID, operation)
+      try { return await operation } finally { pendingMessages.delete(sessionID) }
+    },
+    async status(sessionID) {
+      const controller = new AbortController()
+      const response = await withTimeout(() => client.session.status({ signal: controller.signal }), timeoutMs, "status", sessionID, controller)
+      if (response?.error || response?.response?.ok === false) throw new Error("Session status unavailable")
+      return (response?.data ?? response)?.[sessionID]?.type
     },
     async children(sessionID) {
       try {
@@ -322,7 +336,7 @@ function createOpenCodeAdapter(client, { timeoutMs = 30_000 } = {}) {
       const controller = new AbortController()
       pendingPrompts.add(sessionID)
       try {
-        await withTimeout(
+        const result = await withTimeout(
           () => Promise.resolve().then(() => client.session.promptAsync({
             path: { id: sessionID },
             body: { parts: [{ type: "text", text, synthetic: true }] },
@@ -333,6 +347,9 @@ function createOpenCodeAdapter(client, { timeoutMs = 30_000 } = {}) {
           sessionID,
           controller,
         )
+        if (result?.error || result?.response?.ok === false) {
+          throw new Error(`OpenCode async prompt rejected (${result?.response?.status ?? "unknown"}): ${result?.error?.message || JSON.stringify(result?.error)}`)
+        }
       } catch (error) {
         if (error?.code === "OPENCODE_PROMPT_FAILED" || error?.code === "OPENCODE_PROMPT_PENDING") throw error
         const failure = new Error(`OpenCode async prompt API failed for session ${sessionID}: ${error?.message || String(error)}`)
@@ -500,30 +517,34 @@ function incompleteTraversal(reason, limit, id) {
   return error
 }
 
-async function collectSessionUsage(adapter, rootSessionID, { maxDepth = 6, maxSessions = 96 } = {}) {
+async function collectSessionUsage(adapter, rootSessionID, { maxDepth = 6, maxSessions = 96, rootMessages, concurrency = 4 } = {}) {
   const depthLimit = Math.max(0, Number(maxDepth) || 0)
   const sessionLimit = Math.max(1, Number(maxSessions) || 1)
   const samples = []
   const queue = [{ id: rootSessionID, depth: 0 }]
   const seen = new Set()
 
+  const width = Math.max(1, Math.min(16, Number(concurrency) || 4))
   while (queue.length > 0) {
-    const current = queue.shift()
-    if (!current?.id || seen.has(current.id)) continue
-    if (seen.size >= sessionLimit) throw incompleteTraversal("max_sessions", sessionLimit, current.id)
-    seen.add(current.id)
-
-    const messages = await adapter.messages(current.id)
-    for (const message of messages) {
-      samples.push({ sessionID: current.id, message, descendant: current.id !== rootSessionID })
+    const batch = []
+    while (queue.length && batch.length < width) {
+      const current = queue.shift()
+      if (!current?.id || seen.has(current.id)) continue
+      if (seen.size >= sessionLimit) throw incompleteTraversal("max_sessions", sessionLimit, current.id)
+      seen.add(current.id)
+      batch.push(current)
     }
-
-    const children = await adapter.children(current.id)
-    const unseenChildren = children.map(sessionID).filter((id) => id && !seen.has(id))
-    if (current.depth >= depthLimit && unseenChildren.length > 0) {
-      throw incompleteTraversal("max_depth", depthLimit, current.id)
+    const results = await Promise.all(batch.map(async (current) => {
+      const messages = current.id === rootSessionID && rootMessages ? rootMessages : await adapter.messages(current.id)
+      const children = await adapter.children(current.id)
+      return { current, messages, children }
+    }))
+    for (const { current, messages, children } of results) {
+      for (const message of messages) samples.push({ sessionID: current.id, message, descendant: current.id !== rootSessionID })
+      const unseenChildren = children.map(sessionID).filter((id) => id && !seen.has(id))
+      if (current.depth >= depthLimit && unseenChildren.length > 0) throw incompleteTraversal("max_depth", depthLimit, current.id)
+      for (const id of unseenChildren) queue.push({ id, depth: current.depth + 1 })
     }
-    for (const id of unseenChildren) queue.push({ id, depth: current.depth + 1 })
   }
 
   return samples
@@ -616,6 +637,7 @@ async function runContinuationPhases({
   const {
     listMessages,
     recordTargetTurnOutcome,
+    recordTargetTurnOutcomes,
     accountLiveTarget,
     sendPrompt,
     sendPromptAsync,
@@ -630,11 +652,16 @@ async function runContinuationPhases({
   let recheckDelay = defaultDelay
 
   const rootMessages = await listMessages(host, sessionID)
+  const newMessages = []
   for (const message of rootMessages) {
     const info = message?.info ?? message
     if (info?.role !== "assistant") continue
     const createdAt = Number(info?.time?.created) || 0
     if (createdAt && createdAt < target.createdAtMs) continue
+    if (info?.time && !info.time.completed) continue
+    if (target.runtime?.evaluatedAssistantMessageIDs?.includes(info.id)) continue
+    if (Number(info?.time?.completed) < (target.runtime?.evaluatedThroughMs || 0)) continue
+    if (recordTargetTurnOutcomes) { newMessages.push(message); continue }
     target = (await recordTargetTurnOutcome(stateDir, sessionID, message, {
       expectedTargetID,
       automatic: false,
@@ -649,8 +676,17 @@ async function runContinuationPhases({
       return result(target, phaseContext.value, "stop", recheckDelay)
     }
   }
+  if (recordTargetTurnOutcomes && newMessages.length) {
+    target = (await recordTargetTurnOutcomes(stateDir, sessionID, newMessages, {
+      expectedTargetID,
+      failedExecThreshold: options.failed_exec_threshold ?? 3,
+      emptyAutomaticThreshold: options.empty_auto_threshold ?? 3,
+      execToolNames: options.exec_tool_names,
+    })) || target
+    if (!sameTarget(target, expectedTargetID) || !["active", "budget_limited"].includes(target.status)) return result(target, phaseContext.value, "stop", recheckDelay)
+  }
 
-  target = (await accountLiveTarget(host, stateDir, sessionID, expectedTargetID, options)) || target
+  target = (await accountLiveTarget(host, stateDir, sessionID, expectedTargetID, options, rootMessages)) || target
   if (!sameTarget(target, expectedTargetID)) return result(target, phaseContext.value, "stop", recheckDelay)
   scheduler.resetRetries(sessionID, "pre")
 
@@ -901,10 +937,10 @@ function isAccountableTarget(target) {
   return Boolean(target && ACCOUNTABLE_STATUSES.has(target.status))
 }
 
-async function accountToolBoundary({ stateDir, sessionID, readTarget, listMessages, accountTargetUsage }) {
+async function accountToolBoundary({ stateDir, sessionID, readTarget, listMessages, accountTargetUsage, incrementalMessages }) {
   const target = await readTarget(stateDir, sessionID)
   if (!isAccountableTarget(target)) return null
-  const messages = await listMessages(sessionID)
+  const messages = incrementalMessages ?? await listMessages(sessionID)
   return accountTargetUsage(
     stateDir,
     sessionID,
@@ -1239,6 +1275,8 @@ function normalizeRuntime(value = {}) {
     emptyAutomaticStreak: Math.max(0, Number(value.emptyAutomaticStreak) || 0),
     failedExecStreak: Math.max(0, Number(value.failedExecStreak) || 0),
     evaluatedAssistantMessageIDs: evaluated,
+    evaluatedThroughMs: Math.max(0, Number(value.evaluatedThroughMs) || 0),
+    pendingAutomaticAtMs: Number(value.pendingAutomaticAtMs) > 0 ? Number(value.pendingAutomaticAtMs) : null,
       lastAutomaticAssistantMessageID: value.lastAutomaticAssistantMessageID
       ? String(value.lastAutomaticAssistantMessageID)
         : null,
@@ -1958,6 +1996,7 @@ async function markContinuationStarted(
     if (target.limits.maxAutomaticTurns != null &&
         target.continuationCount > target.limits.maxAutomaticTurns) return null
     target.lastContinuationAtMs = at
+    target.runtime.pendingAutomaticAtMs = at
     startClock(target, at)
     target.updatedAtMs = at
     return writeTargetUnlocked(stateDir, target)
@@ -2112,9 +2151,32 @@ async function recordTargetTurnOutcome(
   return withSessionLock(stateDir, sessionID, async () => {
     const target = await readTarget(stateDir, sessionID)
     if (!target || !ensureExpectedTarget(target, expectedTargetID)) return null
+    return applyTurnOutcome(stateDir, target, message, { automatic, failedExecThreshold, emptyAutomaticThreshold, execToolNames })
+  })
+}
+async function recordTargetTurnOutcomes(stateDir, sessionID, messages, options = {}) {
+  return withSessionLock(stateDir, sessionID, async () => {
+    const target = await readTarget(stateDir, sessionID)
+    if (!target || !ensureExpectedTarget(target, options.expectedTargetID)) return null
+    for (const message of messages) {
+      await applyTurnOutcome(stateDir, target, message, { ...options, automatic: options.automatic ?? false, failedExecThreshold: options.failedExecThreshold ?? 3, emptyAutomaticThreshold: options.emptyAutomaticThreshold ?? 3, execToolNames: options.execToolNames ?? ["bash", "shell", "exec", "terminal"] }, false)
+      if (target.status !== "active" && target.status !== "budget_limited") break
+    }
+    return messages.length ? writeTargetUnlocked(stateDir, target) : target
+  })
+}
+
+async function applyTurnOutcome(stateDir, target, message, { automatic, failedExecThreshold, emptyAutomaticThreshold, execToolNames }, persist = true) {
+    const info = message?.info ?? message
+    const completedAt = Number(info?.time?.completed) || 0
+    if (completedAt && completedAt < target.runtime.evaluatedThroughMs) return target
     const c = classifyAssistantTurn(message, { execToolNames })
     if (c.assistantMessageID && target.runtime.evaluatedAssistantMessageIDs.includes(c.assistantMessageID)) {
       return target
+    }
+    if (target.runtime.pendingAutomaticAtMs && Number(info?.time?.created) >= target.runtime.pendingAutomaticAtMs) {
+      automatic = true
+      target.runtime.pendingAutomaticAtMs = null
     }
     if (c.assistantMessageID) {
       target.runtime.evaluatedAssistantMessageIDs = [
@@ -2122,6 +2184,7 @@ async function recordTargetTurnOutcome(
         c.assistantMessageID,
       ].slice(-500)
     }
+    target.runtime.evaluatedThroughMs = Math.max(target.runtime.evaluatedThroughMs, completedAt)
 
     if (c.successfulTool) target.runtime.failedExecStreak = 0
     else if (c.failedExec) target.runtime.failedExecStreak += 1
@@ -2154,8 +2217,7 @@ async function recordTargetTurnOutcome(
       }
     }
     target.updatedAtMs = at
-    return writeTargetUnlocked(stateDir, target)
-  })
+    return persist ? writeTargetUnlocked(stateDir, target) : target
 }
 
 function continuationPrompt(target, { updatePlanAvailable = true } = {}) {
@@ -2442,10 +2504,11 @@ async function log(client, level, message, extra = undefined) {
 function listMessages(source, sessionID) { return (source.adapter || source).messages(sessionID) }
 function listChildren(source, sessionID) { return (source.adapter || source).children(sessionID) }
 
-async function accountLiveTarget(adapter, stateDir, sessionID, targetID, options) {
+async function accountLiveTarget(adapter, stateDir, sessionID, targetID, options, rootMessages) {
   const samples = await collectSessionUsage(adapter.adapter || adapter, sessionID, {
     maxDepth: Math.max(0, Number(options?.descendant_max_depth ?? 6)),
     maxSessions: Math.max(1, Number(options?.descendant_max_sessions ?? 96)),
+    rootMessages,
   })
   return accountTargetUsage(stateDir, sessionID, samples, { expectedTargetID: targetID })
 }
@@ -2580,6 +2643,7 @@ async function processIdle(scheduler, host, stateDir, sessionID, options) {
         operations: {
           listMessages,
           recordTargetTurnOutcome,
+          recordTargetTurnOutcomes,
           accountLiveTarget,
           sendPrompt: async (currentHost, currentSessionID, prompt) => normalizePromptResponse(await sendPrompt(currentHost, currentSessionID, prompt)),
           sendPromptAsync: typeof host.client?.session?.promptAsync === "function" ? sendPromptAsync : null,
@@ -2600,6 +2664,18 @@ async function processIdle(scheduler, host, stateDir, sessionID, options) {
           if (host.pendingInput.get(sessionID)?.size) {
             scheduler.startContinuationWatchdog(sessionID, options.continuation_watchdog_ms, () => { void checkContinuation().catch(() => {}) })
             return
+          }
+          if (typeof host.client.session.status === "function") {
+            try {
+              const status = await host.adapter.status(sessionID)
+              if (status === "busy" || status === "retry") {
+                scheduler.startContinuationWatchdog(sessionID, options.continuation_watchdog_ms, () => { void checkContinuation().catch(() => {}) })
+                return
+              }
+            } catch {
+              scheduler.startContinuationWatchdog(sessionID, options.continuation_watchdog_ms, () => { void checkContinuation().catch(() => {}) })
+              return
+            }
           }
           await setStoppedStatus(stateDir, sessionID, "paused",
             `Continuation watchdog expired after ${options.continuation_watchdog_ms}ms without a session.idle event.`, expectedTargetID)
@@ -2677,9 +2753,9 @@ function completionResponse(target) {
 }
 
 export const TargetPlugin = async ({ client, $, directory }, rawOptions = {}) => {
-  const options = normalizePluginOptions(rawOptions)
+  const options = normalizePluginOptions({ ...rawOptions, worktree: rawOptions.worktree ?? directory ?? process.cwd() })
   const adapter = createOpenCodeAdapter(client, { timeoutMs: options.host_api_timeout_ms })
-  const host = { adapter, client, pendingInput: new Map() }
+  const host = { adapter, client, pendingInput: new Map(), usageUpdates: new Map() }
   const scheduler = new SchedulerState()
   const stateDir = options.state_dir ? String(options.state_dir) : defaultStateDir()
   const commandName = String(options.command_name || "target")
@@ -2839,13 +2915,19 @@ export const TargetPlugin = async ({ client, $, directory }, rawOptions = {}) =>
       // Cheap root-session accounting at tool boundaries. Full descendant-tree
       // accounting occurs at idle/control boundaries to keep this hook lightweight.
       try {
+        const updates = host.usageUpdates.get(input.sessionID)
+        const consumed = updates ? new Map(updates) : null
         await accountToolBoundary({
           stateDir,
           sessionID: input.sessionID,
           readTarget,
           listMessages: (sessionID) => listMessages(host, sessionID),
+          incrementalMessages: consumed ? [...consumed.values()] : undefined,
           accountTargetUsage,
         })
+        for (const [id, sample] of consumed || []) {
+          if (updates.get(id) === sample) updates.delete(id)
+        }
       } catch (error) {
         await log(client, "warn", "Target tool-boundary accounting failed", {
           sessionID: input.sessionID,
@@ -2889,6 +2971,15 @@ export const TargetPlugin = async ({ client, $, directory }, rawOptions = {}) =>
     },
 
     event: async ({ event }) => {
+      if (event.type === "message.updated") {
+        const info = event.properties?.info
+        if (info?.role === "assistant" && info.sessionID && info.id) {
+          const updates = host.usageUpdates.get(info.sessionID) || new Map()
+          updates.set(info.id, { info })
+          host.usageUpdates.set(info.sessionID, updates)
+        }
+        return
+      }
       if (["permission.asked", "permission.replied", "question.asked", "question.replied", "question.rejected"].includes(event.type)) {
         const properties = event.properties || {}
         const sessionID = properties.sessionID
@@ -2905,6 +2996,7 @@ export const TargetPlugin = async ({ client, $, directory }, rawOptions = {}) =>
       const route = resolveEventAction(event, autoContinue)
       if (route.action === "dispose") {
         host.pendingInput.clear()
+        host.usageUpdates.clear()
         scheduler.dispose()
         return
       }
@@ -2913,6 +3005,7 @@ export const TargetPlugin = async ({ client, $, directory }, rawOptions = {}) =>
 
       if (route.action === "dispose-session") {
         host.pendingInput.delete(sessionID)
+        host.usageUpdates.delete(sessionID)
         scheduler.disposeSession(sessionID)
         return
       }

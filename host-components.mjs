@@ -25,7 +25,7 @@ export async function withHostLock(configDir, operation, { timeout = 120000 } = 
 }
 export function hostVersion(upstream, components) {
   if (!versionPattern.test(upstream)) throw new Error("Invalid upstream version")
-  return upstream + names.filter((name) => components[name]).map((name) => {
+  return upstream + names.filter((name) => components[name] && components[name].requiresHost !== false).map((name) => {
     const version = components[name].version
     if (!versionPattern.test(version)) throw new Error(`Invalid ${name} version`)
     return `+${name}.${version}`

@@ -80,7 +80,7 @@
   },
   "scripts": {
     "build:local": "node scripts/build-local.mjs && node scripts/build-tui.mjs && node scripts/build-install.mjs",
-    "test:unit": "node --test test/core.test.js test/adapter.test.js test/store.test.js test/ledger.test.js test/scheduler.test.js test/traversal.test.js test/repository.test.js test/verification.test.js test/continuation.test.js test/options.test.js test/host.test.js test/errors.test.js test/event-routing.test.js test/error-lifecycle.test.js test/tool-accounting.test.js test/verification-gate.test.js test/context-hooks.test.js test/commands.test.js test/tui-state.test.js test/install-config.test.js",
+    "test:unit": "node --test test/*.test.js",
     "test:smoke": "node test/server-smoke.mjs && node test/continuation-smoke.mjs && node test/budget-wrapup-smoke.mjs && node test/restart-smoke.mjs && npm run test:tui && node test/install-script-smoke.mjs",
     "test:tui": "bun --conditions=browser test/tui-smoke.mjs",
     "check:tui": "tsc -p tsconfig.tui.json && node --check src/tui-state.js && node --check install-config.mjs && node --check dist/target-tui.js && node --check dist/install-config.mjs",

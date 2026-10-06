@@ -12,10 +12,11 @@ a lock left by a terminated installer. Binary rollback refuses external changes.
 
 Target distributions now carry their own coordinator in `dist/host-*.mjs` and
 deploy it into the OpenCode configuration directory. No Patchline installation
-or neighbouring checkout is required. The coordinator clones a tagged upstream
-into `host-build/<version>`, reconstructs extension seams from upstream, adds
-the Target status slot and Patchline slots/selection conditionally, then builds.
-Git, Bun and upstream native compilation dependencies are required.
+or neighbouring checkout is required for legacy migration. New Target registrations declare
+`requiresHost: false`, use the upstream `session_prompt_right` slot, and do not rebuild OpenCode.
+For a tracked legacy `+target` host, the coordinator reconstructs upstream without Target's
+custom slot while retaining required Patchline changes. This one-time build requires Git, Bun
+and upstream native compilation dependencies. Host suffixes exclude stock-slot Target versions.
 
 Target wrapper scripts delegate file copying to the locked helper. Module tests
 cover failed builds, verification rollback, both component orders, updates,

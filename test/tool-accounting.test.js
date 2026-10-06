@@ -45,3 +45,14 @@ test("accountToolBoundary accounts root messages against the current target", as
   assert.deepEqual(result, { targetID: "t1" })
   assert.deepEqual(calls, [["dir", "s", [{ sessionID: "s", message: { id: 1 } }], { expectedTargetID: "t1" }]])
 })
+
+test("tool accounting prefers streamed usage updates without fetching history", async () => {
+  let samples
+  await accountToolBoundary({ stateDir: "d", sessionID: "s",
+    readTarget: async () => ({ targetID: "t", status: "active" }),
+    listMessages: async () => { assert.fail("history must not be fetched") },
+    incrementalMessages: [{ info: { id: "m", role: "assistant", tokens: { output: 10 } } }],
+    accountTargetUsage: async (_dir, _id, value) => { samples = value },
+  })
+  assert.equal(samples[0].message.info.tokens.output, 10)
+})

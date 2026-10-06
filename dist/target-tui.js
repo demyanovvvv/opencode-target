@@ -1,12 +1,12 @@
 // OpenCode Target TUI — generated from src/tui.tsx and src/tui-state.js. Do not edit.
 
 // src/tui.tsx
-import { memo as _$memo } from "@opentui/solid";
 import { createTextNode as _$createTextNode } from "@opentui/solid";
 import { insertNode as _$insertNode } from "@opentui/solid";
 import { effect as _$effect } from "@opentui/solid";
 import { insert as _$insert } from "@opentui/solid";
 import { createComponent as _$createComponent } from "@opentui/solid";
+import { memo as _$memo } from "@opentui/solid";
 import { setProp as _$setProp } from "@opentui/solid";
 import { createElement as _$createElement } from "@opentui/solid";
 import { createEffect, createMemo, createSignal, onCleanup, Show } from "solid-js";
@@ -136,10 +136,7 @@ function TargetIndicator(props) {
   });
   const [disposed, setDisposed] = createSignal(false);
   const [frame, setFrame] = createSignal(0);
-  const sessionID = createMemo(() => {
-    const route = props.api.route.current;
-    return route.name === "session" && typeof route.params?.sessionID === "string" ? route.params.sessionID : null;
-  });
+  const sessionID = createMemo(() => props.sessionID);
   const observer = createTargetObserver({
     read: (sessionID2, context) => readIndicatorState(props.stateDir, sessionID2, context),
     onChange: setSnapshot
@@ -185,7 +182,7 @@ function TargetIndicator(props) {
     _$setProp(_el$, "flexShrink", 0);
     _$insert(_el$, _$createComponent(Show, {
       get when() {
-        return view();
+        return _$memo(() => !!view()?.text)() ? view() : null;
       },
       children: (value) => [(() => {
         var _el$2 = _$createElement("text");
@@ -209,12 +206,12 @@ var tui = async (api, options) => {
   api.slots.register({
     order: 50,
     slots: {
-      session_prompt_status(_context, input) {
+      session_prompt_right(_context, input) {
         return _$createComponent(TargetIndicator, {
           api,
           stateDir,
-          get width() {
-            return input.width;
+          get sessionID() {
+            return input.session_id;
           },
           get language() {
             return options?.language === "ru" ? "ru" : "en";

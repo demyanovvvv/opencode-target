@@ -156,6 +156,8 @@ function normalizeRuntime(value = {}) {
     emptyAutomaticStreak: Math.max(0, Number(value.emptyAutomaticStreak) || 0),
     failedExecStreak: Math.max(0, Number(value.failedExecStreak) || 0),
     evaluatedAssistantMessageIDs: evaluated,
+    evaluatedThroughMs: Math.max(0, Number(value.evaluatedThroughMs) || 0),
+    pendingAutomaticAtMs: Number(value.pendingAutomaticAtMs) > 0 ? Number(value.pendingAutomaticAtMs) : null,
       lastAutomaticAssistantMessageID: value.lastAutomaticAssistantMessageID
       ? String(value.lastAutomaticAssistantMessageID)
         : null,
@@ -875,6 +877,7 @@ export async function markContinuationStarted(
     if (target.limits.maxAutomaticTurns != null &&
         target.continuationCount > target.limits.maxAutomaticTurns) return null
     target.lastContinuationAtMs = at
+    target.runtime.pendingAutomaticAtMs = at
     startClock(target, at)
     target.updatedAtMs = at
     return writeTargetUnlocked(stateDir, target)
@@ -1029,9 +1032,32 @@ export async function recordTargetTurnOutcome(
   return withSessionLock(stateDir, sessionID, async () => {
     const target = await readTarget(stateDir, sessionID)
     if (!target || !ensureExpectedTarget(target, expectedTargetID)) return null
+    return applyTurnOutcome(stateDir, target, message, { automatic, failedExecThreshold, emptyAutomaticThreshold, execToolNames })
+  })
+}
+export async function recordTargetTurnOutcomes(stateDir, sessionID, messages, options = {}) {
+  return withSessionLock(stateDir, sessionID, async () => {
+    const target = await readTarget(stateDir, sessionID)
+    if (!target || !ensureExpectedTarget(target, options.expectedTargetID)) return null
+    for (const message of messages) {
+      await applyTurnOutcome(stateDir, target, message, { ...options, automatic: options.automatic ?? false, failedExecThreshold: options.failedExecThreshold ?? 3, emptyAutomaticThreshold: options.emptyAutomaticThreshold ?? 3, execToolNames: options.execToolNames ?? ["bash", "shell", "exec", "terminal"] }, false)
+      if (target.status !== "active" && target.status !== "budget_limited") break
+    }
+    return messages.length ? writeTargetUnlocked(stateDir, target) : target
+  })
+}
+
+async function applyTurnOutcome(stateDir, target, message, { automatic, failedExecThreshold, emptyAutomaticThreshold, execToolNames }, persist = true) {
+    const info = message?.info ?? message
+    const completedAt = Number(info?.time?.completed) || 0
+    if (completedAt && completedAt < target.runtime.evaluatedThroughMs) return target
     const c = classifyAssistantTurn(message, { execToolNames })
     if (c.assistantMessageID && target.runtime.evaluatedAssistantMessageIDs.includes(c.assistantMessageID)) {
       return target
+    }
+    if (target.runtime.pendingAutomaticAtMs && Number(info?.time?.created) >= target.runtime.pendingAutomaticAtMs) {
+      automatic = true
+      target.runtime.pendingAutomaticAtMs = null
     }
     if (c.assistantMessageID) {
       target.runtime.evaluatedAssistantMessageIDs = [
@@ -1039,6 +1065,7 @@ export async function recordTargetTurnOutcome(
         c.assistantMessageID,
       ].slice(-500)
     }
+    target.runtime.evaluatedThroughMs = Math.max(target.runtime.evaluatedThroughMs, completedAt)
 
     if (c.successfulTool) target.runtime.failedExecStreak = 0
     else if (c.failedExec) target.runtime.failedExecStreak += 1
@@ -1071,8 +1098,7 @@ export async function recordTargetTurnOutcome(
       }
     }
     target.updatedAtMs = at
-    return writeTargetUnlocked(stateDir, target)
-  })
+    return persist ? writeTargetUnlocked(stateDir, target) : target
 }
 
 export function continuationPrompt(target, { updatePlanAvailable = true } = {}) {

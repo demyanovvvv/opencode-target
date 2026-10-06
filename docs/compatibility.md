@@ -16,20 +16,17 @@
 The package keeps `@opencode-ai/plugin` optional at runtime so a local self-contained plugin can
 be copied into OpenCode. It is a development dependency for the repository's smoke tests.
 
-The compact inline indicator requires the custom `session_prompt_status` host slot. Stock
-OpenCode 1.18.34 does not provide it; the server plugin remains independently usable.
-For the Windows host, clone OpenCode v1.18.34 into `.opencode-host` and run
-`node scripts/register-host-components.mjs`, then `node scripts/build-host.mjs`.
-The shared `host-components.json` records installed components and their versions. The build
-checks their files, reconstructs host extensions from upstream, and composes a stable display
-version: `1.18.34+patchline.1.2.0+target.0.5.0`, or one suffix when only one is present.
-These display versions are not SemVer strings when they contain multiple `+` signs.
-Target install/uninstall updates its own entry. Patchline installer integration is pending;
-run the registration helper again after changing the installed Patchline package. Installation
-of plugin files and successful host binary installation remain separate operations.
-Host binary installation is separate from `install.ps1`, which installs the Target plugins.
-This custom host suppresses stock binary upgrades to preserve its extensions; rebuild it
-explicitly when upgrading. Its build omits the embedded web UI.
+The compact inline indicator uses the stock `session_prompt_right` slot, verified in upstream
+OpenCode 1.18.34. Target installation/update does not build or replace OpenCode. The server
+plugin remains independently usable. SDK 1.18.30 is the pinned test dependency; the declared
+peer range is not a claim that every subsequent host version has been exercised.
+
+Target is registered with `requiresHost: false`. A manifest recording a previously installed
+`+target` host triggers a one-time coordinated migration: Target's custom prompt seam is removed,
+and any host extensions required by Patchline are preserved. Migration uses the existing guarded
+binary replacement/rollback mechanism and requires its Git/Bun/native build dependencies.
+New stock installations do not need those dependencies. Existing untracked custom binaries are
+not automatically replaced merely because their displayed version contains a suffix.
 
 ## Local environment note
 
@@ -65,9 +62,9 @@ npm run check
 - OpenCode messages, children, and prompt calls are bounded by `host_api_timeout_ms` (30 seconds
   by default). A timeout is surfaced as a typed host failure and follows the same retry/lifecycle
   handling as other transient OpenCode API failures.
-- The continuation watchdog measures absence of `session.idle` after asynchronous dispatch, not
-  UI health. Pending permission/question requests defer its check. It neither grants permissions
-  nor aborts the host and does not cover the initial slash-command turn.
+- The continuation watchdog checks session status before stopping an asynchronous continuation.
+  Pending permission/question requests, busy/retry status, and status API failures defer its check.
+  It neither grants permissions nor aborts the host and does not cover the initial slash-command turn.
 - Release validation installs `@opencode-ai/plugin@1.18.30`, OpenTUI core/solid/keymap `0.4.5`, and
   Solid `1.9.12` into a temporary project and imports the packed package. The host's peer set is
   pinned together so registry updates cannot select an incompatible OpenTUI generation.

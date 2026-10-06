@@ -206,11 +206,13 @@ try {
   await hangingHooks.event({ event: { type: "server.instance.disposed" } })
 
   let watchdogPromptCount = 0
+  let watchdogStatus = "busy"
   const watchdogClient = {
     app: client.app,
     session: {
       messages: async () => ({ data: [] }),
       children: async () => ({ data: [] }),
+      status: async () => ({ data: { watchdog: { type: watchdogStatus } } }),
       promptAsync: async () => {
         watchdogPromptCount += 1
         return { data: undefined }
@@ -229,6 +231,9 @@ try {
   await new Promise((resolve) => setTimeout(resolve, 1_100))
   assert.equal((await readTarget(stateDir, "watchdog")).status, "active", "permission wait is not a stalled continuation")
   await watchdogHooks.event({ event: { type: "permission.replied", properties: { sessionID: "watchdog", requestID: "permission-1" } } })
+  await new Promise((resolve) => setTimeout(resolve, 1_100))
+  assert.equal((await readTarget(stateDir, "watchdog")).status, "active", "busy session is not a stalled continuation")
+  watchdogStatus = "idle"
   await new Promise((resolve) => setTimeout(resolve, 1_100))
   const watchdogTarget = await readTarget(stateDir, "watchdog")
   assert.equal(watchdogPromptCount, 1)

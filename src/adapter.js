@@ -55,14 +55,19 @@ export function createGitAdapter({ exec = execFileAsync } = {}) {
 
 export function createOpenCodeAdapter(client, { timeoutMs = 30_000 } = {}) {
   const pendingPrompts = new Set()
+  const pendingMessages = new Map()
   return {
     async messages(sessionID) {
+      if (pendingMessages.has(sessionID)) return pendingMessages.get(sessionID)
+      const operation = (async () => {
+      const controller = new AbortController()
       try {
         const data = unwrapData(await withTimeout(
-          () => client.session.messages({ path: { id: sessionID } }),
+          () => client.session.messages({ path: { id: sessionID }, signal: controller.signal }),
           timeoutMs,
           "messages",
           sessionID,
+          controller,
         ))
         return requireArray(data, "messages", sessionID)
       } catch (error) {
@@ -72,6 +77,15 @@ export function createOpenCodeAdapter(client, { timeoutMs = 30_000 } = {}) {
         failure.cause = error
         throw failure
       }
+      })()
+      pendingMessages.set(sessionID, operation)
+      try { return await operation } finally { pendingMessages.delete(sessionID) }
+    },
+    async status(sessionID) {
+      const controller = new AbortController()
+      const response = await withTimeout(() => client.session.status({ signal: controller.signal }), timeoutMs, "status", sessionID, controller)
+      if (response?.error || response?.response?.ok === false) throw new Error("Session status unavailable")
+      return (response?.data ?? response)?.[sessionID]?.type
     },
     async children(sessionID) {
       try {
@@ -128,7 +142,7 @@ export function createOpenCodeAdapter(client, { timeoutMs = 30_000 } = {}) {
       const controller = new AbortController()
       pendingPrompts.add(sessionID)
       try {
-        await withTimeout(
+        const result = await withTimeout(
           () => Promise.resolve().then(() => client.session.promptAsync({
             path: { id: sessionID },
             body: { parts: [{ type: "text", text, synthetic: true }] },
@@ -139,6 +153,9 @@ export function createOpenCodeAdapter(client, { timeoutMs = 30_000 } = {}) {
           sessionID,
           controller,
         )
+        if (result?.error || result?.response?.ok === false) {
+          throw new Error(`OpenCode async prompt rejected (${result?.response?.status ?? "unknown"}): ${result?.error?.message || JSON.stringify(result?.error)}`)
+        }
       } catch (error) {
         if (error?.code === "OPENCODE_PROMPT_FAILED" || error?.code === "OPENCODE_PROMPT_PENDING") throw error
         const failure = new Error(`OpenCode async prompt API failed for session ${sessionID}: ${error?.message || String(error)}`)

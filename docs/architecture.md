@@ -50,6 +50,12 @@ Every asynchronous mutation carries an expected `target_id`. New Targets after c
 `session.idle` is the durable continuation boundary. Automatic continuations use the host's
 asynchronous prompt endpoint, so the idle hook dispatches the next turn and returns immediately;
 the next `session.idle` accounts its result and decides whether to continue. Synchronous
+The runtime persists `pendingAutomaticAtMs` before dispatch so the returned assistant outcome
+retains automatic classification after reload. Only completed, previously unseen outcomes are
+classified; a completion-time watermark prevents replay beyond the bounded ID history. New
+outcomes are applied under one lock. Root history is reused by usage accounting. Streamed
+`message.updated` usage samples avoid full-history requests at tool boundaries; idle performs
+a full reconciliation. Descendant traversal uses bounded concurrency and deterministic ordering.
 `session.prompt()` remains available for operations that need the completed assistant message.
 
 The adapter fences one unsettled prompt request per session. A prompt timeout aborts its transport,
@@ -157,10 +163,10 @@ An invalid prompt response is never treated as an empty assistant turn.
 ## Deep module seams
 
 The optional TUI companion is a separate target-exclusive entrypoint (`src/tui.tsx`, compiled to
-`dist/target-tui.js`). It contributes to `session_prompt_status`, a host extension beside the
-spinner/interrupt hint or idle directory, with a muted divider and compact spent-token count.
-Solid's reactive TUI state supplies session activity, permissions, questions, theme, route, and animation preference.
-session's local persisted file at 500 ms intervals; it does not import the mutable runtime or
+`dist/target-tui.js`). It contributes to the stock `session_prompt_right` slot, with a muted
+divider and compact spent-token count. The slot supplies session identity; Solid's reactive
+TUI state supplies activity, permissions, questions, theme, and animation preference.
+The observer reads the session's local persisted file at 500 ms intervals; it does not import the mutable runtime or
 invoke quarantine, accounting, continuation, or lifecycle operations. Its small read projection
 validates version/identity/status/token fields and reports unavailable state on read errors.
 Compatibility tests read files created by the real core. A session-scoped abort controller fences

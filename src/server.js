@@ -28,6 +28,7 @@ import {
   publicTargetJSON,
   readTarget,
   recordTargetTurnOutcome,
+  recordTargetTurnOutcomes,
   recordVerificationResult,
   releaseSchedulerLease,
   renewSchedulerLease,
@@ -52,10 +53,11 @@ async function log(client, level, message, extra = undefined) {
 function listMessages(source, sessionID) { return (source.adapter || source).messages(sessionID) }
 function listChildren(source, sessionID) { return (source.adapter || source).children(sessionID) }
 
-async function accountLiveTarget(adapter, stateDir, sessionID, targetID, options) {
+async function accountLiveTarget(adapter, stateDir, sessionID, targetID, options, rootMessages) {
   const samples = await collectSessionUsage(adapter.adapter || adapter, sessionID, {
     maxDepth: Math.max(0, Number(options?.descendant_max_depth ?? 6)),
     maxSessions: Math.max(1, Number(options?.descendant_max_sessions ?? 96)),
+    rootMessages,
   })
   return accountTargetUsage(stateDir, sessionID, samples, { expectedTargetID: targetID })
 }
@@ -190,6 +192,7 @@ async function processIdle(scheduler, host, stateDir, sessionID, options) {
         operations: {
           listMessages,
           recordTargetTurnOutcome,
+          recordTargetTurnOutcomes,
           accountLiveTarget,
           sendPrompt: async (currentHost, currentSessionID, prompt) => normalizePromptResponse(await sendPrompt(currentHost, currentSessionID, prompt)),
           sendPromptAsync: typeof host.client?.session?.promptAsync === "function" ? sendPromptAsync : null,
@@ -210,6 +213,18 @@ async function processIdle(scheduler, host, stateDir, sessionID, options) {
           if (host.pendingInput.get(sessionID)?.size) {
             scheduler.startContinuationWatchdog(sessionID, options.continuation_watchdog_ms, () => { void checkContinuation().catch(() => {}) })
             return
+          }
+          if (typeof host.client.session.status === "function") {
+            try {
+              const status = await host.adapter.status(sessionID)
+              if (status === "busy" || status === "retry") {
+                scheduler.startContinuationWatchdog(sessionID, options.continuation_watchdog_ms, () => { void checkContinuation().catch(() => {}) })
+                return
+              }
+            } catch {
+              scheduler.startContinuationWatchdog(sessionID, options.continuation_watchdog_ms, () => { void checkContinuation().catch(() => {}) })
+              return
+            }
           }
           await setStoppedStatus(stateDir, sessionID, "paused",
             `Continuation watchdog expired after ${options.continuation_watchdog_ms}ms without a session.idle event.`, expectedTargetID)
@@ -287,9 +302,9 @@ function completionResponse(target) {
 }
 
 export const TargetPlugin = async ({ client, $, directory }, rawOptions = {}) => {
-  const options = normalizePluginOptions(rawOptions)
+  const options = normalizePluginOptions({ ...rawOptions, worktree: rawOptions.worktree ?? directory ?? process.cwd() })
   const adapter = createOpenCodeAdapter(client, { timeoutMs: options.host_api_timeout_ms })
-  const host = { adapter, client, pendingInput: new Map() }
+  const host = { adapter, client, pendingInput: new Map(), usageUpdates: new Map() }
   const scheduler = new SchedulerState()
   const stateDir = options.state_dir ? String(options.state_dir) : defaultStateDir()
   const commandName = String(options.command_name || "target")
@@ -449,13 +464,19 @@ export const TargetPlugin = async ({ client, $, directory }, rawOptions = {}) =>
       // Cheap root-session accounting at tool boundaries. Full descendant-tree
       // accounting occurs at idle/control boundaries to keep this hook lightweight.
       try {
+        const updates = host.usageUpdates.get(input.sessionID)
+        const consumed = updates ? new Map(updates) : null
         await accountToolBoundary({
           stateDir,
           sessionID: input.sessionID,
           readTarget,
           listMessages: (sessionID) => listMessages(host, sessionID),
+          incrementalMessages: consumed ? [...consumed.values()] : undefined,
           accountTargetUsage,
         })
+        for (const [id, sample] of consumed || []) {
+          if (updates.get(id) === sample) updates.delete(id)
+        }
       } catch (error) {
         await log(client, "warn", "Target tool-boundary accounting failed", {
           sessionID: input.sessionID,
@@ -499,6 +520,15 @@ export const TargetPlugin = async ({ client, $, directory }, rawOptions = {}) =>
     },
 
     event: async ({ event }) => {
+      if (event.type === "message.updated") {
+        const info = event.properties?.info
+        if (info?.role === "assistant" && info.sessionID && info.id) {
+          const updates = host.usageUpdates.get(info.sessionID) || new Map()
+          updates.set(info.id, { info })
+          host.usageUpdates.set(info.sessionID, updates)
+        }
+        return
+      }
       if (["permission.asked", "permission.replied", "question.asked", "question.replied", "question.rejected"].includes(event.type)) {
         const properties = event.properties || {}
         const sessionID = properties.sessionID
@@ -515,6 +545,7 @@ export const TargetPlugin = async ({ client, $, directory }, rawOptions = {}) =>
       const route = resolveEventAction(event, autoContinue)
       if (route.action === "dispose") {
         host.pendingInput.clear()
+        host.usageUpdates.clear()
         scheduler.dispose()
         return
       }
@@ -523,6 +554,7 @@ export const TargetPlugin = async ({ client, $, directory }, rawOptions = {}) =>
 
       if (route.action === "dispose-session") {
         host.pendingInput.delete(sessionID)
+        host.usageUpdates.delete(sessionID)
         scheduler.disposeSession(sessionID)
         return
       }

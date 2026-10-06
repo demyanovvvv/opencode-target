@@ -158,6 +158,12 @@ export async function installTargetFiles({ configDir, root, tuiConfig = null, un
       } catch (error) { if (error.code !== "ENOENT") throw error; snapshots.push({ file, bytes: null }) }
     }
     try {
+      // Only a previously installed Target host needs a one-time migration.
+      let legacyTargetHost = false
+      try {
+        const manifest = JSON.parse(await readFile(path.join(configDir, "host-components.json"), "utf8"))
+        legacyTargetHost = /\+target\./.test(manifest.host?.version || "")
+      } catch (error) { if (error.code !== "ENOENT") throw error }
       if (uninstall) {
         // State deletion is deferred until the host transition has succeeded.
         const quarantine = path.join(configDir, `.target-state-transition-${process.pid}`)
@@ -171,9 +177,9 @@ export async function installTargetFiles({ configDir, root, tuiConfig = null, un
         const version = typeof TARGET_PACKAGE_VERSION !== "undefined" ? TARGET_PACKAGE_VERSION : JSON.parse(await readFile(path.join(root, "package.json"), "utf8")).version
         await mkdir(path.join(configDir, "target"), { recursive: true })
         await writeFile(path.join(configDir, "target/package.json"), JSON.stringify({ name: "opencode-target", version }) + "\n")
-        await registerComponentLocked(configDir, "target", { version, files: ["plugins/target.js", "tui-plugins/target.js", "target/package.json"], packageFile: "target/package.json", registration: "opencode-target" })
+        await registerComponentLocked(configDir, "target", { version, requiresHost: false, files: ["plugins/target.js", "tui-plugins/target.js", "target/package.json"], packageFile: "target/package.json", registration: "opencode-target" })
       }
-      await hostInstaller(configDir, upstream)
+      if (legacyTargetHost) await hostInstaller(configDir, upstream)
       if (uninstall) {
         await rm(path.join(configDir, "target/package.json"), { force: true })
         await uninstallTarget({ configDir, tuiConfig, stateDir, locked: true })

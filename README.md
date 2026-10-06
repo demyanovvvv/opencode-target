@@ -135,9 +135,9 @@ or, for one project:
 
 ### TUI indicator
 
-The repository also builds `dist/target-tui.js`, a separate OpenCode TUI plugin. With the
-Target-compatible host it appears beside the spinner/interrupt hint, or beside the directory
-when idle: `│ ● Target: working · 16.6k`. The muted divider separates it from host controls;
+The repository also builds `dist/target-tui.js`, a separate OpenCode TUI plugin. It uses the
+stock `session_prompt_right` slot (verified in OpenCode 1.18.34), beside the prompt controls:
+`│ ● Target: working · 16.6k`. No Target-specific OpenCode build is required;
 the compact counter is the current Target's spent tokens. Long reasons and budget totals stay
 in `/target status`. Narrow terminals drop the status label before the counter, without wrapping.
 It reads local state every 500 ms. OpenCode's `animations_enabled` controls animation.

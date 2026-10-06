@@ -21,6 +21,7 @@ export async function runContinuationPhases({
   const {
     listMessages,
     recordTargetTurnOutcome,
+    recordTargetTurnOutcomes,
     accountLiveTarget,
     sendPrompt,
     sendPromptAsync,
@@ -35,11 +36,16 @@ export async function runContinuationPhases({
   let recheckDelay = defaultDelay
 
   const rootMessages = await listMessages(host, sessionID)
+  const newMessages = []
   for (const message of rootMessages) {
     const info = message?.info ?? message
     if (info?.role !== "assistant") continue
     const createdAt = Number(info?.time?.created) || 0
     if (createdAt && createdAt < target.createdAtMs) continue
+    if (info?.time && !info.time.completed) continue
+    if (target.runtime?.evaluatedAssistantMessageIDs?.includes(info.id)) continue
+    if (Number(info?.time?.completed) < (target.runtime?.evaluatedThroughMs || 0)) continue
+    if (recordTargetTurnOutcomes) { newMessages.push(message); continue }
     target = (await recordTargetTurnOutcome(stateDir, sessionID, message, {
       expectedTargetID,
       automatic: false,
@@ -54,8 +60,17 @@ export async function runContinuationPhases({
       return result(target, phaseContext.value, "stop", recheckDelay)
     }
   }
+  if (recordTargetTurnOutcomes && newMessages.length) {
+    target = (await recordTargetTurnOutcomes(stateDir, sessionID, newMessages, {
+      expectedTargetID,
+      failedExecThreshold: options.failed_exec_threshold ?? 3,
+      emptyAutomaticThreshold: options.empty_auto_threshold ?? 3,
+      execToolNames: options.exec_tool_names,
+    })) || target
+    if (!sameTarget(target, expectedTargetID) || !["active", "budget_limited"].includes(target.status)) return result(target, phaseContext.value, "stop", recheckDelay)
+  }
 
-  target = (await accountLiveTarget(host, stateDir, sessionID, expectedTargetID, options)) || target
+  target = (await accountLiveTarget(host, stateDir, sessionID, expectedTargetID, options, rootMessages)) || target
   if (!sameTarget(target, expectedTargetID)) return result(target, phaseContext.value, "stop", recheckDelay)
   scheduler.resetRetries(sessionID, "pre")
 

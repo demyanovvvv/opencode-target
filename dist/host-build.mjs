@@ -24,20 +24,6 @@ export function transformHostFile(kind, source, components, coordinator = "", co
     source = source.slice(0, start) + block + source.slice(end)
     if (!source.includes('import { usePluginRuntime }')) source = 'import { usePluginRuntime } from "../../plugin/runtime"\n' + source
   }
-  if (kind === "prompt" && components.target) {
-    source = replace(source, 'import { useProject } from "../../context/project"', 'import { useProject } from "../../context/project"\nimport { usePluginRuntime } from "../../plugin/runtime"')
-    source = replace(source, "export function Prompt(props: PromptProps) {", "export function Prompt(props: PromptProps) {\n  const pluginRuntime = usePluginRuntime()")
-    const start = source.indexOf('<box width="100%" flexDirection="row" justifyContent="space-between">')
-    const end = source.indexOf('<Show when={status().type !== "retry"}>', start)
-    if (start < 0 || end < 0) throw new Error("Unsupported OpenCode prompt status row")
-    let block = source.slice(start, end)
-    block = replace(block, '<box width="100%" flexDirection="row" justifyContent="space-between">', '<box width="100%" flexDirection="row" justifyContent="space-between">\n          <box flexDirection="row" gap={1} flexGrow={1} flexShrink={1} overflow="hidden">')
-    block = replace(block, 'flexGrow={1}\n                justifyContent={status().type === "retry" ? "space-between" : "flex-start"}', 'flexShrink={0}\n                justifyContent="flex-start"')
-    const closing = block.lastIndexOf("</Switch>")
-    if (closing < 0) throw new Error("Unsupported OpenCode prompt status switch")
-    block = block.slice(0, closing) + block.slice(closing).replace("</Switch>", '</Switch>\n          <Show when={props.sessionID}>\n            <pluginRuntime.Slot name="session_prompt_status" session_id={props.sessionID!} width={Math.max(0, Math.min(36, dimensions().width - 58))} />\n          </Show>\n          </box>')
-    source = source.slice(0, start) + block + source.slice(end)
-  }
   if (kind === "installation") {
     source = replace(source, "semver.major(current)", 'semver.major(current.split("+")[0]!)')
     source = replace(source, "semver.minor(current)", 'semver.minor(current.split("+")[0]!)')
@@ -63,6 +49,7 @@ export async function runHostCommand(command, args, cwd, env = {}) {
 
 // The checkout is private to this coordinator; never reset a user's checkout.
 export async function buildHost({ upstream, components, configDir, coordinator }) {
+  components = Object.fromEntries(Object.entries(components).filter(([, component]) => component.requiresHost !== false))
   hostVersion(upstream, components)
   const host = path.join(configDir, "host-build", upstream)
   await mkdir(path.dirname(host), { recursive: true })

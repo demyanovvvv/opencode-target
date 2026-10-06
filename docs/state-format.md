@@ -69,6 +69,10 @@ instead of being interpreted with guessed semantics.
 | `usageByMessage` | object | Cumulative per-message accounting baselines keyed by `sessionID:messageID`. |
 | `runtime` | object | Breaker streaks, evaluated assistant IDs, and latest turn classification. |
 
+`runtime.evaluatedThroughMs` is the completed-message watermark; the bounded recent ID list
+deduplicates messages at its boundary. `runtime.pendingAutomaticAtMs` marks an automatic dispatch
+whose result is not classified yet. Missing fields normalize to zero/null in schemas 2 and 3.
+
 ## Accounting fields
 
 For an assistant message, billable usage is:

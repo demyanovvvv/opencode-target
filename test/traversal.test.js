@@ -88,3 +88,44 @@ test("collectSessionUsage propagates typed host failures without returning parti
 
   await assert.rejects(collectSessionUsage(host, "root"), (error) => error === failure)
 })
+
+test("usage traversal runs bounded concurrent requests and reuses root messages", async () => {
+  let active = 0
+  let peak = 0
+  const host = {
+    async messages(id) {
+      assert.notEqual(id, "root")
+      active += 1
+      peak = Math.max(peak, active)
+      await new Promise((resolve) => setTimeout(resolve, 5))
+      active -= 1
+      return [{ info: { id } }]
+    },
+    async children(id) { return id === "root" ? [{ id: "a" }, { id: "b" }, { id: "c" }] : [] },
+  }
+  const samples = await collectSessionUsage(host, "root", { rootMessages: [], concurrency: 2 })
+  assert.equal(peak, 2)
+  assert.deepEqual(samples.map((s) => s.sessionID), ["a", "b", "c"])
+})
+
+test("benchmark bounded traversal against sequential host latency", async () => {
+  for (const count of [1, 16, 96]) {
+    let calls = 0
+    const request = async (value) => { calls += 1; await new Promise((resolve) => setTimeout(resolve, 2)); return value }
+    const host = {
+      messages: () => request([]),
+      children: (id) => request(id === "root" ? Array.from({ length: count - 1 }, (_, i) => ({ id: `c-${i}` })) : []),
+    }
+    const start = performance.now()
+    await host.messages("root")
+    for (let i = 0; i < count; i++) { await host.messages(i ? `c-${i - 1}` : "root"); await host.children(i ? `c-${i - 1}` : "root") }
+    const baselineMs = performance.now() - start
+    const baselineCalls = calls
+    calls = 0
+    const optimizedStart = performance.now()
+    await collectSessionUsage(host, "root", { rootMessages: [] })
+    const optimizedMs = performance.now() - optimizedStart
+    console.log(`traversal benchmark sessions=${count}: sequential=${baselineMs.toFixed(1)}ms/${baselineCalls} calls; optimized=${optimizedMs.toFixed(1)}ms/${calls} calls`)
+    assert.equal(calls, count * 2 - 1)
+  }
+})
