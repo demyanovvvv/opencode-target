@@ -22,6 +22,12 @@ export async function handleSessionError(event, { stateDir, sessionID, options, 
   const text = eventErrorText(event)
   const status = resolveErrorStatus(text, target.status)
   if (status === null) return null
+  if (status === "paused") {
+    // Interrupts are control-plane operations: persist before any host API wait.
+    const stopped = await setStoppedStatus(stateDir, sessionID, status, errorStopReason(status, text), expectedTargetID)
+    if (stopped) void Promise.resolve().then(() => accountLiveTarget(stateDir, sessionID, expectedTargetID, options)).catch(() => {})
+    return stopped
+  }
   const accounted = await accountLiveTarget(stateDir, sessionID, expectedTargetID, options)
   if (accounted && accounted.targetID !== expectedTargetID) return null
   const activeStatus = accounted?.status ?? target.status

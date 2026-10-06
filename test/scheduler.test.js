@@ -110,6 +110,26 @@ test("whenIdle waits for in-flight work and any scheduled recheck", async () => 
   await idle
 })
 
+test("continuation watchdog replaces an existing timer and can be stopped", () => {
+  const timers = fakeTimers()
+  const scheduler = new SchedulerState(timers.api)
+  const calls = []
+
+  scheduler.startContinuationWatchdog("session-a", 25, () => calls.push("old"))
+  const oldID = [...timers.timeouts.keys()][0]
+  const oldCallback = timers.timeouts.get(oldID).callback
+  scheduler.startContinuationWatchdog("session-a", 50, () => calls.push("new"))
+  assert.equal(timers.timeouts.has(oldID), false)
+  oldCallback()
+  assert.deepEqual(calls, [], "queued callbacks from replaced timers are fenced")
+  const [newID, timer] = [...timers.timeouts.entries()][0]
+  assert.notEqual(newID, oldID)
+  scheduler.stopContinuationWatchdog("session-a")
+  assert.equal(timers.timeouts.has(newID), false)
+  timer.callback()
+  assert.deepEqual(calls, [])
+})
+
 test("disposing a session resolves pending idle waiters", async () => {
   const scheduler = new SchedulerState()
   let release

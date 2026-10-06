@@ -157,15 +157,20 @@ An invalid prompt response is never treated as an empty assistant turn.
 ## Deep module seams
 
 The optional TUI companion is a separate target-exclusive entrypoint (`src/tui.tsx`, compiled to
-`dist/target-tui.js`). It contributes one `app_bottom` line so retry/permission prompts do not
-hide the indicator. Solid's reactive TUI state supplies session activity, pending permissions,
-questions, theme, route, and animation preference. `src/tui-state.js` observes only the current
+`dist/target-tui.js`). It contributes to `session_prompt_status`, a host extension beside the
+spinner/interrupt hint or idle directory, with a muted divider and compact spent-token count.
+Solid's reactive TUI state supplies session activity, permissions, questions, theme, route, and animation preference.
 session's local persisted file at 500 ms intervals; it does not import the mutable runtime or
 invoke quarantine, accounting, continuation, or lifecycle operations. Its small read projection
 validates version/identity/status/token fields and reports unavailable state on read errors.
 Compatibility tests read files created by the real core. A session-scoped abort controller fences
 late reads, and component/plugin disposal clears polling and animation timers. Animation frames
 do not trigger file reads.
+
+The slot always returns a stable container, including during asynchronous loading and when no
+Target exists. OpenTUI's slot registry discards initially empty contributions; returning a
+conditional component alone prevents later state reads from becoming visible. The renderer smoke
+therefore exercises the real slot registry rather than invoking only the contribution function.
 
 `TargetRepository` owns the persistence protocol: session locks, normalized reads and writes,
 validation, quarantine, and the atomic mutation seam. Core lifecycle functions retain the public

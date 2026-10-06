@@ -4,7 +4,7 @@ import { SchedulerState } from "./scheduler.js"
 import { runContinuationPhases } from "./continuation.js"
 import { executeVerificationGate } from "./verification-gate.js"
 import { normalizePluginOptions } from "./options.js"
-import { createHostSessionAdapter, normalizePromptResponse } from "./host.js"
+import { normalizePromptResponse } from "./host.js"
 import { isTransientAccountingError } from "./errors.js"
 import { resolveEventAction } from "./event-routing.js"
 import { handleSessionError } from "./error-lifecycle.js"
@@ -49,8 +49,8 @@ async function log(client, level, message, extra = undefined) {
   }
 }
 
-function listMessages(client, sessionID) { return createHostSessionAdapter(client).messages(sessionID) }
-function listChildren(client, sessionID) { return createHostSessionAdapter(client).children(sessionID) }
+function listMessages(source, sessionID) { return (source.adapter || source).messages(sessionID) }
+function listChildren(source, sessionID) { return (source.adapter || source).children(sessionID) }
 
 async function accountLiveTarget(adapter, stateDir, sessionID, targetID, options) {
   const samples = await collectSessionUsage(adapter.adapter || adapter, sessionID, {
@@ -61,29 +61,33 @@ async function accountLiveTarget(adapter, stateDir, sessionID, targetID, options
 }
 
 async function sendPrompt(client, sessionID, text) {
-  void log(client.client, "debug", "Target continuation prompt started", { sessionID, phase: "prompt" })
+  const hostAdapter = client.adapter || client
+  const logClient = client.client || client
+  void log(logClient, "debug", "Target continuation prompt started", { sessionID, phase: "prompt" })
   try {
-    const response = await createHostSessionAdapter(client).prompt(sessionID, text)
-    void log(client.client, "debug", "Target continuation prompt finished", { sessionID, phase: "post" })
+    const response = await hostAdapter.prompt(sessionID, text)
+    void log(logClient, "debug", "Target continuation prompt finished", { sessionID, phase: "post" })
     return response
   } catch (error) {
-    void log(client.client, "warn", "Target continuation prompt failed", { sessionID, phase: "prompt", code: error?.code, error: error?.message })
+    void log(logClient, "warn", "Target continuation prompt failed", { sessionID, phase: "prompt", code: error?.code, error: error?.message })
     throw error
   }
 }
 
 async function sendPromptAsync(client, sessionID, text) {
-  void log(client.client, "debug", "Target async continuation prompt started", { sessionID, phase: "prompt" })
+  const hostAdapter = client.adapter || client
+  const logClient = client.client || client
+  void log(logClient, "debug", "Target async continuation prompt started", { sessionID, phase: "prompt" })
   try {
-    await client.adapter.promptAsync(sessionID, text)
-    void log(client.client, "debug", "Target async continuation prompt dispatched", { sessionID, phase: "dispatched" })
+    await hostAdapter.promptAsync(sessionID, text)
+    void log(logClient, "debug", "Target async continuation prompt dispatched", { sessionID, phase: "dispatched" })
   } catch (error) {
-    void log(client.client, "warn", "Target async continuation prompt failed", { sessionID, phase: "prompt", code: error?.code, error: error?.message })
+    void log(logClient, "warn", "Target async continuation prompt failed", { sessionID, phase: "prompt", code: error?.code, error: error?.message })
     throw error
   }
 }
 
-async function targetDiagnostics(client, stateDir, sessionID) {
+async function targetDiagnostics(host, stateDir, sessionID) {
   const checks = []
   try {
     const target = await readTarget(stateDir, sessionID)
@@ -102,8 +106,8 @@ async function targetDiagnostics(client, stateDir, sessionID) {
     checks.push(`state: error (${error?.message || String(error)})`)
   }
   for (const [label, operation] of [
-    ["messages API", () => listMessages(client, sessionID)],
-    ["children API", () => listChildren(client, sessionID)],
+    ["messages API", () => listMessages(host, sessionID)],
+    ["children API", () => listChildren(host, sessionID)],
   ]) {
     try {
       await operation()
@@ -199,6 +203,20 @@ async function processIdle(scheduler, host, stateDir, sessionID, options) {
       accountingPhase = phaseContext.value
       shouldRecheck = phaseResult.decision === "recheck"
       recheckDelay = phaseResult.recheckDelay
+      if (phaseResult.awaitingIdle) {
+        const checkContinuation = async () => {
+          const current = await readTarget(stateDir, sessionID)
+          if (current?.targetID !== expectedTargetID || current.status !== "active") return
+          if (host.pendingInput.get(sessionID)?.size) {
+            scheduler.startContinuationWatchdog(sessionID, options.continuation_watchdog_ms, () => { void checkContinuation().catch(() => {}) })
+            return
+          }
+          await setStoppedStatus(stateDir, sessionID, "paused",
+            `Continuation watchdog expired after ${options.continuation_watchdog_ms}ms without a session.idle event.`, expectedTargetID)
+          void log(host.client, "error", "Target continuation watchdog expired", { sessionID, expectedTargetID, timeoutMs: options.continuation_watchdog_ms })
+        }
+        scheduler.startContinuationWatchdog(sessionID, options.continuation_watchdog_ms, () => { void checkContinuation().catch(() => {}) })
+      }
     } catch (error) {
       accountingPhase = phaseContext.value
       if (expectedTargetID && error?.code === "OPENCODE_PROMPT_PENDING") {
@@ -271,7 +289,7 @@ function completionResponse(target) {
 export const TargetPlugin = async ({ client, $, directory }, rawOptions = {}) => {
   const options = normalizePluginOptions(rawOptions)
   const adapter = createOpenCodeAdapter(client, { timeoutMs: options.host_api_timeout_ms })
-  const host = { adapter, client }
+  const host = { adapter, client, pendingInput: new Map() }
   const scheduler = new SchedulerState()
   const stateDir = options.state_dir ? String(options.state_dir) : defaultStateDir()
   const commandName = String(options.command_name || "target")
@@ -435,7 +453,7 @@ export const TargetPlugin = async ({ client, $, directory }, rawOptions = {}) =>
           stateDir,
           sessionID: input.sessionID,
           readTarget,
-          listMessages: (sessionID) => listMessages(client, sessionID),
+          listMessages: (sessionID) => listMessages(host, sessionID),
           accountTargetUsage,
         })
       } catch (error) {
@@ -481,8 +499,22 @@ export const TargetPlugin = async ({ client, $, directory }, rawOptions = {}) =>
     },
 
     event: async ({ event }) => {
+      if (["permission.asked", "permission.replied", "question.asked", "question.replied", "question.rejected"].includes(event.type)) {
+        const properties = event.properties || {}
+        const sessionID = properties.sessionID
+        if (sessionID) {
+          const pending = host.pendingInput.get(sessionID) || new Set()
+          if (event.type.endsWith(".asked")) pending.add(properties.id)
+          else pending.delete(properties.requestID)
+          if (pending.size) host.pendingInput.set(sessionID, pending)
+          else host.pendingInput.delete(sessionID)
+          void log(client, "info", "Target input boundary", { sessionID, type: event.type, pending: pending.size })
+        }
+        return
+      }
       const route = resolveEventAction(event, autoContinue)
       if (route.action === "dispose") {
+        host.pendingInput.clear()
         scheduler.dispose()
         return
       }
@@ -490,23 +522,29 @@ export const TargetPlugin = async ({ client, $, directory }, rawOptions = {}) =>
       const { sessionID } = route
 
       if (route.action === "dispose-session") {
+        host.pendingInput.delete(sessionID)
         scheduler.disposeSession(sessionID)
         return
       }
 
       if (route.action === "process-idle") {
+        if (host.pendingInput.get(sessionID)?.size) return
+        scheduler.stopContinuationWatchdog(sessionID)
         void processIdle(scheduler, host, stateDir, sessionID, options)
         return
       }
 
       if (route.action === "process-error") {
+        host.pendingInput.delete(sessionID)
+        scheduler.stopContinuationWatchdog(sessionID)
+        scheduler.clearRecheck(sessionID)
         try {
           await handleSessionError(event, {
             stateDir,
             sessionID,
             options,
             readTarget,
-            accountLiveTarget: (stateDir, sessionID, targetID, options) => accountLiveTarget(client, stateDir, sessionID, targetID, options),
+            accountLiveTarget: (stateDir, sessionID, targetID, options) => accountLiveTarget(host, stateDir, sessionID, targetID, options),
             setStoppedStatus,
           })
         } catch (error) {

@@ -13,6 +13,9 @@ shell.cwd = () => shell
 shell.nothrow = () => shell
 const $ = shell
 const client = {
+  // OpenCode runtime clients may expose an unrelated `adapter` property; Target
+  // must use its own normalized adapter rather than probing that object.
+  adapter: { runtimeOnly: true },
   app: { log: async () => ({}) },
   session: {
     messages: async ({ path }) => ({ data: messages.get(path.id) || [] }),

@@ -9,12 +9,8 @@ if ($Uninstall) {
 $Dest = Join-Path $Config "plugins"
 $TuiDest = Join-Path $Config "tui-plugins"
 $Action = if ((Test-Path (Join-Path $Dest "target.js")) -or (Test-Path (Join-Path $TuiDest "target.js"))) { "Updated" } else { "Installed" }
-New-Item -ItemType Directory -Force -Path $Dest | Out-Null
-New-Item -ItemType Directory -Force -Path $TuiDest | Out-Null
-Copy-Item -Force (Join-Path $Root "dist\target.js") (Join-Path $Dest "target.js")
-Copy-Item -Force (Join-Path $Root "dist\target-tui.js") (Join-Path $TuiDest "target.js")
 $ConfigTool = Join-Path $Root "dist\install-config.mjs"
-& node $ConfigTool --config-dir $Config
+& node $ConfigTool --config-dir $Config --install-files
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 Write-Host "$Action OpenCode Target to $(Join-Path $Dest 'target.js')"
 Write-Host "$Action Target indicator to $(Join-Path $TuiDest 'target.js')"

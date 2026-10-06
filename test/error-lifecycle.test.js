@@ -60,3 +60,15 @@ test("handleSessionError honors accounting-driven budget limit and stale writes"
   assert.equal(stale, null)
   assert.equal(calls.length, 0)
 })
+test("abort persists pause before accounting and survives accounting failure", async () => {
+  const calls = []
+  const stopped = { targetID: "t1", status: "paused" }
+  const result = await handleSessionError({ error: "request aborted" }, {
+    stateDir: "dir", sessionID: "s", options: {},
+    readTarget: async () => ({ targetID: "t1", status: "active" }),
+    setStoppedStatus: async (...args) => { calls.push(["stop", ...args]); return stopped },
+    accountLiveTarget: async () => { calls.push(["account"]); throw new Error("offline") },
+  })
+  assert.equal(result, stopped)
+  assert.deepEqual(calls[0], ["stop", "dir", "s", "paused", "Session interrupted/aborted", "t1"])
+})

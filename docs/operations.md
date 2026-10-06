@@ -162,6 +162,8 @@ but it must not start new substantive Target work.
 
 - Rate, quota, and usage-limit errors transition an active Target to `usage_limited`.
 - Abort, cancel, and interruption errors transition an active Target to `paused`.
+  Interruption persists the pause before attempting final accounting, so an unavailable messages
+  API cannot prevent cancellation from being recorded.
 - Other runtime errors transition an active Target to `blocked`.
 
 After the external condition is resolved, use `/target resume`. Resume does not bypass an

@@ -13,6 +13,7 @@ test("normalizes plugin defaults and nested verification retry policy", () => {
   assert.equal(options.auto_continue, true)
   assert.equal(options.host_api_timeout_ms, 30_000)
   assert.equal(options.scheduler_lease_ms, 30_000)
+  assert.equal(options.continuation_watchdog_ms, 60_000)
   assert.deepEqual(options.verification, [{
     id: "lint",
     command: "npm run lint",

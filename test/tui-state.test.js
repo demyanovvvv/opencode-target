@@ -59,21 +59,21 @@ test("indicator combines lifecycle with live session activity; stopped states wi
   assert.equal(indicatorView({ kind: "unavailable" }).label, "unavailable")
 })
 
-test("indicator explains stopped states, distinguishes runtime errors, and localizes labels", () => {
-  const paused = indicatorView({ kind: "target", target: { ...target, status: "paused", stopReason: "User request" } }, {}, { language: "ru" })
-  assert.match(paused.text, /Target · Пауза/)
-  assert.match(paused.text, /\/target resume/)
-  assert.match(paused.text, /User request/)
+test("indicator stays compact, shows spent tokens, and drops details before tokens", () => {
+  const paused = indicatorView({ kind: "target", target: { ...target, status: "paused", stopReason: "User request" } }, {}, { language: "ru", animations: false })
+  assert.equal(paused.text, "Ⅱ Target: пауза · 24.8k")
+  assert.doesNotMatch(paused.text, /resume|User request|120k|tokens/)
   const error = indicatorView({ kind: "target", target: { ...target, status: "blocked", lastError: "API\n\u001b[31mfailed" } }, {}, { language: "ru" })
-  assert.equal(error.label, "Ошибка")
-  assert.match(error.text, /API failed/)
-  assert.doesNotMatch(error.text, /\u001b|\n/)
+  assert.equal(error.text, "! Target: блок · 24.8k")
   assert.equal(error.intervalMs, 0)
-  assert.equal(indicatorView(snapshot("blocked")).label, "blocked")
-  assert.match(indicatorView(snapshot(), { type: "retry", attempt: 2 }, { language: "ru" }).text, /Повтор запроса · попытка 2/)
-  assert.match(indicatorView(snapshot(), { needsInput: true, permission: true }, { language: "ru" }).text, /Нужно разрешение/)
-  assert.match(indicatorView(snapshot(), { needsInput: true }, { language: "ru" }).text, /Нужен ответ/)
-  assert.match(indicatorView(snapshot(), { type: "busy" }, { language: "ru", width: 20 }).text, /Target/)
+  assert.equal(indicatorView(snapshot(), {}, { animations: false, width: 18 }).text, "⋯ Target · 24.8k")
+  assert.equal(indicatorView(snapshot(), {}, { animations: false, width: 10 }).text, "⋯ Target")
+  assert.equal(indicatorView(snapshot(), {}, { animations: false, width: 1 }).text, "⋯")
+  assert.equal(indicatorView(snapshot(), { needsInput: true, permission: true }, { language: "ru" }).label, "ответ")
+  assert.equal(indicatorView(snapshot(), { type: "retry" }, { language: "ru" }).label, "повтор")
+  for (const [tokensUsed, text] of [[850, "850"], [16600, "16.6k"], [1200000, "1.2M"]]) {
+    assert.ok(indicatorView({ kind: "target", target: { ...target, tokensUsed } }).text.endsWith(` · ${text}`))
+  }
   assert.equal(resolveIndicatorLanguage({ language: "ru" }), "ru")
   assert.equal(resolveIndicatorLanguage({}, { LANG: "ru_RU.UTF-8" }), "ru")
   assert.equal(resolveIndicatorLanguage({ language: "en" }, { LANG: "ru_RU" }), "en")
@@ -90,16 +90,15 @@ test("animation is independent from state reads and honors disabled animations",
   assert.equal(still.intervalMs, 0)
 })
 
-test("indicator drops token details first on narrow terminals and handles absent budgets", () => {
-  const full = indicatorView(snapshot(), { type: "busy" }, { width: 80 }).text
-  assert.match(full, /24\.8k \/ 120k/)
+test("indicator preserves spent tokens before status on narrow terminals", () => {
+  assert.match(indicatorView(snapshot(), { type: "busy" }, { width: 80 }).text, /24\.8k$/)
   const narrow = indicatorView(snapshot(), { type: "busy" }, { width: 22 }).text
-  assert.match(narrow, /Target.*working/)
-  assert.doesNotMatch(narrow, /24\.8/)
-  for (const width of [1, 8, 16, 22, 40]) {
+  assert.match(narrow, /Target · 24\.8k/)
+  assert.doesNotMatch(narrow, /working/)
+  for (const width of [0, 1, 8, 16, 22, 40]) {
     assert.ok([...indicatorView(snapshot("budget_limited"), {}, { width }).text].length <= width)
   }
-  assert.match(indicatorView({ kind: "target", target: { ...target, tokenBudget: null } }).text, /24\.8k tokens/)
+  assert.match(indicatorView({ kind: "target", target: { ...target, tokenBudget: null } }).text, /24\.8k$/)
 })
 
 function fakeTimers() {

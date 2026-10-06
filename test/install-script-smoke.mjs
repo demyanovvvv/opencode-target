@@ -4,6 +4,7 @@ import os from "node:os"
 import path from "node:path"
 import { spawn } from "node:child_process"
 import { fileURLToPath } from "node:url"
+import { resolveHostBinary } from "../host-runtime.mjs"
 
 const source = process.argv[2] ? path.resolve(process.argv[2]) : fileURLToPath(new URL("..", import.meta.url))
 const temp = await mkdtemp(path.join(os.tmpdir(), "opencode-target-install-script-"))
@@ -25,10 +26,12 @@ function run(command, args, env) {
 try {
   // Only archive artifacts are copied: there is no node_modules or source fallback here.
   await mkdir(path.join(root, "dist"), { recursive: true })
-  for (const file of ["install.ps1", "install.sh", "install.ru.ps1", "install.ru.sh", "dist/target.js", "dist/target-tui.js", "dist/install-config.mjs"]) {
+  for (const file of ["install.ps1", "install.sh", "install.ru.ps1", "install.ru.sh", "dist/target.js", "dist/target-tui.js", "dist/install-config.mjs", "dist/host-components.mjs", "dist/host-build.mjs", "dist/host-runtime.mjs", "dist/host-cli.mjs"]) {
     await copyFile(path.join(source, file), path.join(root, file))
   }
-  const env = { ...process.env, OPENCODE_CONFIG_DIR: configDir, OPENCODE_TUI_CONFIG: "", OPENCODE_TARGET_STATE_DIR: path.join(temp, "state") }
+  const isolatedHost = path.join(temp, process.platform === "win32" ? "opencode.exe" : "opencode")
+  await copyFile(await resolveHostBinary(), isolatedHost)
+  const env = { ...process.env, OPENCODE_HOST_BINARY: isolatedHost, OPENCODE_CONFIG_DIR: configDir, OPENCODE_TUI_CONFIG: "", OPENCODE_TARGET_STATE_DIR: path.join(temp, "state") }
   const installers = process.platform === "win32" && !process.env.TARGET_TEST_SH
     ? [["English", "install.ps1", ["-NoProfile", "-File"]], ["Russian", "install.ru.ps1", ["-NoProfile", "-File"]]]
     : [["English", "install.sh", []], ["Russian", "install.ru.sh", []]]

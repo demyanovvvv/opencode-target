@@ -2,12 +2,13 @@
 
 // src/tui.tsx
 import { memo as _$memo } from "@opentui/solid";
-import { effect as _$effect } from "@opentui/solid";
+import { createTextNode as _$createTextNode } from "@opentui/solid";
 import { insertNode as _$insertNode } from "@opentui/solid";
+import { effect as _$effect } from "@opentui/solid";
 import { insert as _$insert } from "@opentui/solid";
+import { createComponent as _$createComponent } from "@opentui/solid";
 import { setProp as _$setProp } from "@opentui/solid";
 import { createElement as _$createElement } from "@opentui/solid";
-import { createComponent as _$createComponent } from "@opentui/solid";
 import { createEffect, createMemo, createSignal, onCleanup, Show } from "solid-js";
 import { useTerminalDimensions } from "@opentui/solid";
 
@@ -47,25 +48,22 @@ async function readIndicatorState(stateDir, sessionID, { signal } = {}) {
 }
 var frames = ["\u280B", "\u2819", "\u2839", "\u2838", "\u283C", "\u2834", "\u2826", "\u2827", "\u2807", "\u280F"];
 var states = {
-  working: { label: "working", ru: "\u0420\u0430\u0431\u043E\u0442\u0430\u0435\u0442", icon: "\u25CF", color: "accent", intervalMs: 80 },
-  waiting: { label: "waiting", ru: "\u041E\u0436\u0438\u0434\u0430\u043D\u0438\u0435", icon: "\u22EF", color: "textMuted", intervalMs: 400 },
-  retrying: { label: "retrying", ru: "\u041F\u043E\u0432\u0442\u043E\u0440 \u0437\u0430\u043F\u0440\u043E\u0441\u0430", icon: "\u21BB", color: "warning", intervalMs: 400 },
-  input: { label: "needs input", ru: "\u041D\u0443\u0436\u0435\u043D \u043E\u0442\u0432\u0435\u0442", icon: "?", color: "warning" },
-  permission: { label: "needs input", ru: "\u041D\u0443\u0436\u043D\u043E \u0440\u0430\u0437\u0440\u0435\u0448\u0435\u043D\u0438\u0435", icon: "?", color: "warning" },
-  paused: { label: "paused", ru: "\u041F\u0430\u0443\u0437\u0430", icon: "\u2161", color: "warning" },
-  blocked: { label: "blocked", ru: "\u041E\u0448\u0438\u0431\u043A\u0430", icon: "!", color: "error" },
-  budget_limited: { label: "budget limit", ru: "\u041B\u0438\u043C\u0438\u0442 \u0431\u044E\u0434\u0436\u0435\u0442\u0430", icon: "!", color: "warning" },
-  usage_limited: { label: "usage limit", ru: "\u041B\u0438\u043C\u0438\u0442 \u043F\u0440\u043E\u0432\u0430\u0439\u0434\u0435\u0440\u0430", icon: "!", color: "warning" },
-  complete: { label: "complete", ru: "\u0417\u0430\u0432\u0435\u0440\u0448\u0435\u043D\u043E", icon: "\u2713", color: "success" },
-  unavailable: { label: "unavailable", ru: "\u0421\u043E\u0441\u0442\u043E\u044F\u043D\u0438\u0435 \u043D\u0435\u0434\u043E\u0441\u0442\u0443\u043F\u043D\u043E", icon: "?", color: "textMuted" }
+  working: { label: "working", ru: "\u0440\u0430\u0431\u043E\u0442\u0430", icon: "\u25CF", color: "accent", intervalMs: 80 },
+  waiting: { label: "waiting", ru: "\u0436\u0434\u0451\u0442", icon: "\u22EF", color: "textMuted", intervalMs: 400 },
+  retrying: { label: "retrying", ru: "\u043F\u043E\u0432\u0442\u043E\u0440", icon: "\u21BB", color: "warning", intervalMs: 400 },
+  input: { label: "needs input", ru: "\u043E\u0442\u0432\u0435\u0442", icon: "?", color: "warning" },
+  permission: { label: "needs input", ru: "\u043E\u0442\u0432\u0435\u0442", icon: "?", color: "warning" },
+  paused: { label: "paused", ru: "\u043F\u0430\u0443\u0437\u0430", icon: "\u2161", color: "warning" },
+  blocked: { label: "blocked", ru: "\u0431\u043B\u043E\u043A", icon: "!", color: "error" },
+  budget_limited: { label: "budget limit", ru: "\u043B\u0438\u043C\u0438\u0442", icon: "!", color: "warning" },
+  usage_limited: { label: "usage limit", ru: "\u043B\u0438\u043C\u0438\u0442", icon: "!", color: "warning" },
+  complete: { label: "complete", ru: "\u0433\u043E\u0442\u043E\u0432\u043E", icon: "\u2713", color: "success" },
+  unavailable: { label: "unavailable", ru: "\u043D\u0435\u0442 \u0434\u0430\u043D\u043D\u044B\u0445", icon: "?", color: "textMuted" }
 };
 function compactTokens(value) {
   if (value < 1e3) return String(value);
   const unit = value >= 1e6 ? 1e6 : 1e3;
   return `${Number((value / unit).toFixed(1))}${unit === 1e3 ? "k" : "M"}`;
-}
-function cleanDetail(value) {
-  return String(value || "").replace(/\u001b\[[0-9;]*m/g, "").replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, " ").replace(/\s+/g, " ").trim().slice(0, 120);
 }
 function indicatorView(snapshot, activity = {}, { animations = true, frame = 0, width = 80, language = "en" } = {}) {
   if (!snapshot || snapshot.kind === "missing" || snapshot.kind === "loading") return null;
@@ -78,14 +76,12 @@ function indicatorView(snapshot, activity = {}, { animations = true, frame = 0, 
   const intervalMs = animations ? display.intervalMs ?? 0 : 0;
   const icon = intervalMs ? frames[frame % frames.length] : display.icon;
   const label = language === "ru" ? display.ru : display.label;
-  const reason = cleanDetail(target?.stopReason || target?.lastError);
-  const detail = state === "retrying" && activity.attempt ? language === "ru" ? `\u043F\u043E\u043F\u044B\u0442\u043A\u0430 ${activity.attempt}` : `attempt ${activity.attempt}` : state === "paused" ? ["/target resume", reason].filter(Boolean).join(" \xB7 ") : reason;
-  const base = `${icon} Target \xB7 ${label}`;
-  const budget = target ? target.tokenBudget == null ? `${compactTokens(target.tokensUsed)} tokens` : `${compactTokens(target.tokensUsed)} / ${compactTokens(target.tokenBudget)}` : null;
-  const full = [base, detail, budget].filter(Boolean).join(" \xB7 ");
-  const text = full.length <= width ? full : base.length <= width ? base : `${icon} ${label}`;
-  const clipped = text.length <= width ? text : width <= 1 ? icon.slice(0, width) : `${text.slice(0, width - 1)}\u2026`;
-  return { ...display, label, icon, intervalMs, text: clipped };
+  const tokens = target ? compactTokens(target.tokensUsed ?? 0) : null;
+  const base = `${icon} Target`;
+  const full = `${base}: ${label}${tokens == null ? "" : ` \xB7 ${tokens}`}`;
+  const compact = `${base}${tokens == null ? "" : ` \xB7 ${tokens}`}`;
+  const text = [full, compact, base, icon].find((value) => value.length <= width) ?? "";
+  return { ...display, label, icon, intervalMs, text, tokens };
 }
 function createTargetObserver({ read, onChange, timers = globalThis, pollMs = 500 }) {
   let sessionID = null;
@@ -172,7 +168,7 @@ function TargetIndicator(props) {
   const view = createMemo(() => indicatorView(current(), activity(), {
     animations: animations(),
     frame: frame(),
-    width: Math.max(1, dimensions().width - 2),
+    width: Math.max(0, Math.min(36, dimensions().width - 2, props.width ?? 36) - 2),
     language: props.language
   }));
   const interval = createMemo(() => view()?.intervalMs ?? 0);
@@ -182,33 +178,44 @@ function TargetIndicator(props) {
     const timer = setInterval(() => setFrame((value) => (value + 1) % 10), delay);
     onCleanup(() => clearInterval(timer));
   });
-  return _$createComponent(Show, {
-    get when() {
-      return view();
-    },
-    children: (value) => (() => {
-      var _el$ = _$createElement("box"), _el$2 = _$createElement("text");
-      _$insertNode(_el$, _el$2);
-      _$setProp(_el$, "paddingLeft", 1);
-      _$setProp(_el$, "paddingRight", 1);
-      _$setProp(_el$, "height", 1);
-      _$setProp(_el$, "flexShrink", 0);
-      _$setProp(_el$2, "wrapMode", "none");
-      _$insert(_el$2, () => value().text);
-      _$effect((_$p) => _$setProp(_el$2, "fg", theme()[value().color], _$p));
-      return _el$;
-    })()
-  });
+  return (() => {
+    var _el$ = _$createElement("box");
+    _$setProp(_el$, "flexDirection", "row");
+    _$setProp(_el$, "gap", 1);
+    _$setProp(_el$, "flexShrink", 0);
+    _$insert(_el$, _$createComponent(Show, {
+      get when() {
+        return view();
+      },
+      children: (value) => [(() => {
+        var _el$2 = _$createElement("text");
+        _$insertNode(_el$2, _$createTextNode(`\u2502`));
+        _$effect((_$p) => _$setProp(_el$2, "fg", theme().textMuted, _$p));
+        return _el$2;
+      })(), (() => {
+        var _el$4 = _$createElement("text");
+        _$setProp(_el$4, "wrapMode", "none");
+        _$insert(_el$4, () => value().text);
+        _$effect((_$p) => _$setProp(_el$4, "fg", theme()[value().color], _$p));
+        return _el$4;
+      })()]
+    }));
+    _$effect((_$p) => _$setProp(_el$, "height", view()?.text ? 1 : 0, _$p));
+    return _el$;
+  })();
 }
 var tui = async (api, options) => {
   const stateDir = resolveIndicatorStateDir(options);
   api.slots.register({
     order: 50,
     slots: {
-      app_bottom() {
+      session_prompt_status(_context, input) {
         return _$createComponent(TargetIndicator, {
           api,
           stateDir,
+          get width() {
+            return input.width;
+          },
           get language() {
             return options?.language === "ru" ? "ru" : "en";
           }

@@ -5,6 +5,7 @@ export class SchedulerState {
     this.inFlightWaiters = new Map()
     this.rechecks = new Map()
     this.heartbeats = new Map()
+    this.continuationWatchdogs = new Map()
     this.retries = new Map()
     this.disposed = false
   }
@@ -79,6 +80,25 @@ export class SchedulerState {
     this.heartbeats.delete(sessionID)
   }
 
+  startContinuationWatchdog(sessionID, delayMs, operation) {
+    if (this.disposed) return false
+    this.stopContinuationWatchdog(sessionID)
+    const timer = this.timers.setTimeout(() => {
+      if (this.continuationWatchdogs.get(sessionID) !== timer || this.disposed) return
+      this.continuationWatchdogs.delete(sessionID)
+      operation()
+    }, Math.max(0, delayMs))
+    timer?.unref?.()
+    this.continuationWatchdogs.set(sessionID, timer)
+    return true
+  }
+
+  stopContinuationWatchdog(sessionID) {
+    const timer = this.continuationWatchdogs.get(sessionID)
+    if (timer !== undefined) this.timers.clearTimeout(timer)
+    this.continuationWatchdogs.delete(sessionID)
+  }
+
   nextRetry(sessionID, { maxAttempts = 1, baseDelayMs = 250, maxDelayMs = 5000 } = {}, scope = "default") {
     if (this.disposed) return { attempt: 0, retry: false, delayMs: 0 }
     const sessionRetries = this.retries.get(sessionID) || new Map()
@@ -104,6 +124,7 @@ export class SchedulerState {
   disposeSession(sessionID) {
     this.clearRecheck(sessionID)
     this.stopHeartbeat(sessionID)
+    this.stopContinuationWatchdog(sessionID)
     this.resetRetries(sessionID)
     this.resolveIdleWaiters(sessionID)
   }
@@ -113,6 +134,7 @@ export class SchedulerState {
     this.disposed = true
     for (const sessionID of [...this.rechecks.keys()]) this.clearRecheck(sessionID)
     for (const sessionID of [...this.heartbeats.keys()]) this.stopHeartbeat(sessionID)
+    for (const sessionID of [...this.continuationWatchdogs.keys()]) this.stopContinuationWatchdog(sessionID)
     for (const sessionID of [...this.inFlightWaiters.keys()]) this.resolveIdleWaiters(sessionID)
     this.retries.clear()
   }

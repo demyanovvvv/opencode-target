@@ -135,12 +135,12 @@ or, for one project:
 
 ### TUI indicator
 
-The repository also builds `dist/target-tui.js`, a separate OpenCode TUI plugin. It displays the
-current Target under the input area with clear status labels, animated working/retrying states, and static
-icons for needs input, pause, blocked, budget limit, usage limit, completion, and unavailable state. It
-also shows retry attempts and sanitized stop/error reasons when available. It reads
-the local Target JSON without modifying or quarantining it, polls it every 500 ms, and follows the
-current TUI session. OpenCode's `animations_enabled` setting controls the animation.
+The repository also builds `dist/target-tui.js`, a separate OpenCode TUI plugin. With the
+Target-compatible host it appears beside the spinner/interrupt hint, or beside the directory
+when idle: `│ ● Target: working · 16.6k`. The muted divider separates it from host controls;
+the compact counter is the current Target's spent tokens. Long reasons and budget totals stay
+in `/target status`. Narrow terminals drop the status label before the counter, without wrapping.
+It reads local state every 500 ms. OpenCode's `animations_enabled` controls animation.
 
 The installer adds this TUI registration automatically. For manual installation, add it to
 `tui.json` alongside your existing settings:
@@ -527,6 +527,7 @@ Each session has one JSON state file. Writes use a per-session file lock plus te
 | `scheduler_lease_ms` | `30000` | Persisted continuation ownership lease; minimum 1000 ms |
 | `max_automatic_turns` | none | Runtime limit for automatic physical turns per Target |
 | `max_active_seconds` | none | Runtime limit for active wall-clock seconds |
+| `continuation_watchdog_ms` | `60000` | Check for a missing `session.idle` after async dispatch; pending permission/question requests defer the check |
 | `max_no_progress_turns` | none | Runtime limit for consecutive automatic turns with no activity or final text |
 | `state_dir` | platform state dir | Override persisted Target directory |
 | `command_name` | `target` | Main slash command |

@@ -62,6 +62,7 @@ export function normalizePluginOptions(options = {}) {
     descendant_max_depth: integerOption(options, "descendant_max_depth", 6, 0),
     descendant_max_sessions: integerOption(options, "descendant_max_sessions", 96, 1),
     scheduler_lease_ms: integerOption(options, "scheduler_lease_ms", 30_000, 1_000),
+    continuation_watchdog_ms: integerOption(options, "continuation_watchdog_ms", 60_000, 1_000),
     max_automatic_turns: integerOption(options, "max_automatic_turns", null, 1),
     max_active_seconds: integerOption(options, "max_active_seconds", null, 1),
     max_no_progress_turns: integerOption(options, "max_no_progress_turns", null, 1),

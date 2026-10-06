@@ -204,6 +204,37 @@ try {
   assert.equal(hangingTarget.schedulerLease, null)
   assert.match(hangingTarget.stopReason, /still pending/)
   await hangingHooks.event({ event: { type: "server.instance.disposed" } })
+
+  let watchdogPromptCount = 0
+  const watchdogClient = {
+    app: client.app,
+    session: {
+      messages: async () => ({ data: [] }),
+      children: async () => ({ data: [] }),
+      promptAsync: async () => {
+        watchdogPromptCount += 1
+        return { data: undefined }
+      },
+    },
+  }
+  const watchdogHooks = await TargetPlugin({ client: watchdogClient }, {
+    state_dir: stateDir,
+    min_continue_interval_ms: 0,
+    continuation_watchdog_ms: 1_000,
+  })
+  await watchdogHooks.tool.create_target.execute({ objective: "Pause when idle never returns" }, { sessionID: "watchdog" })
+  await watchdogHooks.event({ event: { type: "session.idle", properties: { sessionID: "watchdog" } } })
+  await watchdogHooks.whenIdle("watchdog")
+  await watchdogHooks.event({ event: { type: "permission.asked", properties: { sessionID: "watchdog", id: "permission-1" } } })
+  await new Promise((resolve) => setTimeout(resolve, 1_100))
+  assert.equal((await readTarget(stateDir, "watchdog")).status, "active", "permission wait is not a stalled continuation")
+  await watchdogHooks.event({ event: { type: "permission.replied", properties: { sessionID: "watchdog", requestID: "permission-1" } } })
+  await new Promise((resolve) => setTimeout(resolve, 1_100))
+  const watchdogTarget = await readTarget(stateDir, "watchdog")
+  assert.equal(watchdogPromptCount, 1)
+  assert.equal(watchdogTarget.status, "paused")
+  assert.match(watchdogTarget.stopReason, /watchdog expired/i)
+  await watchdogHooks.event({ event: { type: "server.instance.disposed" } })
   console.log("continuation smoke: ok")
 } finally {
   await rm(stateDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 25 })

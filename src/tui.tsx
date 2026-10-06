@@ -6,7 +6,7 @@ import { createTargetObserver, indicatorView, readIndicatorState, resolveIndicat
 
 const id = "opencode-target-tui"
 
-function TargetIndicator(props: { api: TuiPluginApi; stateDir: string; language: "en" | "ru" }) {
+function TargetIndicator(props: { api: TuiPluginApi; stateDir: string; language: "en" | "ru"; width?: number }) {
   const dimensions = useTerminalDimensions()
   const theme = () => props.api.theme.current
   const [snapshot, setSnapshot] = createSignal({ kind: "missing", sessionID: null })
@@ -42,7 +42,7 @@ function TargetIndicator(props: { api: TuiPluginApi; stateDir: string; language:
   const view = createMemo(() => indicatorView(current(), activity(), {
     animations: animations(),
     frame: frame(),
-    width: Math.max(1, dimensions().width - 2),
+    width: Math.max(0, Math.min(36, dimensions().width - 2, props.width ?? 36) - 2),
     language: props.language,
   }))
   const interval = createMemo(() => view()?.intervalMs ?? 0)
@@ -55,23 +55,21 @@ function TargetIndicator(props: { api: TuiPluginApi; stateDir: string; language:
   })
 
   return (
-    <Show when={view()}>
-      {(value) => (
-        <box paddingLeft={1} paddingRight={1} height={1} flexShrink={0}>
-          <text fg={theme()[value().color]} wrapMode="none">{value().text}</text>
-        </box>
-      )}
-    </Show>
+    <box flexDirection="row" gap={1} height={view()?.text ? 1 : 0} flexShrink={0}>
+      <Show when={view()}>
+        {(value) => <><text fg={theme().textMuted}>│</text><text fg={theme()[value().color]} wrapMode="none">{value().text}</text></>}
+      </Show>
+    </box>
   )
 }
 
 const tui: TuiPlugin = async (api, options) => {
   const stateDir = resolveIndicatorStateDir(options)
-  api.slots.register({
+  api.slots.register<{ session_prompt_status: { session_id: string; width: number } }>({
     order: 50,
     slots: {
-      app_bottom() {
-        return <TargetIndicator api={api} stateDir={stateDir} language={options?.language === "ru" ? "ru" : "en"} />
+      session_prompt_status(_context, input) {
+        return <TargetIndicator api={api} stateDir={stateDir} width={input.width} language={options?.language === "ru" ? "ru" : "en"} />
       },
     },
   })

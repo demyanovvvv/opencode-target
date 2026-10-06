@@ -3,7 +3,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
 import { createSignal } from "solid-js"
-import { testRender } from "@opentui/solid"
+import { testRender, createSolidSlotRegistry, createSlot, useRenderer } from "@opentui/solid"
 import { createTarget, readTarget, setStoppedStatus, targetPath } from "../src/core.js"
 import plugin from "../dist/target-tui.js"
 
@@ -41,10 +41,15 @@ try {
   assert.equal(plugin.server, undefined)
   await plugin.tui(api, { state_dir: dir })
   assert.equal(slots.length, 1)
-  assert.equal(typeof slots[0].slots.app_bottom, "function")
-  screen = await testRender(() => slots[0].slots.app_bottom(), { width: 80, height: 4 })
+  assert.equal(typeof slots[0].slots.session_prompt_status, "function")
+  screen = await testRender(() => {
+    const registry = createSolidSlotRegistry(useRenderer(), { theme: api.theme })
+    registry.register({ ...slots[0], id: plugin.id })
+    const Slot = createSlot(registry)
+    return Slot({ name: "session_prompt_status", session_id: "session", width: 36 })
+  }, { width: 80, height: 4 })
   const working = await frameWith("working")
-  assert.match(working, /0 \/ 120k/)
+  assert.match(working, /│.*Target: working · 0/)
   await pause(120)
   await screen.renderOnce()
   assert.notEqual(screen.captureCharFrame(), working, "working animates")
@@ -72,12 +77,13 @@ try {
     await frameWith(label)
   }
   screen.resize(24, 4)
-  const narrow = await frameWith("complete")
-  assert.doesNotMatch(narrow, /120k/)
+  const narrow = await frameWith("│ ✓ Target · 0")
+  assert.ok(narrow.split("\n").every((line) => line.length <= 24))
   setRoute({ name: "session", params: { sessionID: "empty" } })
   await pause(80)
   await screen.renderOnce()
   assert.equal(screen.captureCharFrame().trim(), "", "new session must not display the old Target")
+  screen.resize(80, 4)
   setRoute({ name: "session", params: { sessionID: "session" } })
   await frameWith("complete")
   await rm(targetPath(dir, "session"))

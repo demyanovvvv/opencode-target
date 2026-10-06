@@ -2,8 +2,8 @@ function sameTarget(target, expectedTargetID) {
   return target?.targetID === expectedTargetID
 }
 
-function result(target, phase, decision, recheckDelay, error = null) {
-  return { target, phase, decision, recheckDelay, error }
+function result(target, phase, decision, recheckDelay, error = null, awaitingIdle = false) {
+  return { target, phase, decision, recheckDelay, error, awaitingIdle }
 }
 
 export async function runContinuationPhases({
@@ -102,7 +102,7 @@ export async function runContinuationPhases({
   if (sendPromptAsync) {
     await sendPromptAsync(host, sessionID, continuationPrompt(target))
     scheduler.resetRetries(sessionID, "prompt")
-    return result(target, phaseContext.value, "stop", recheckDelay)
+    return result(target, phaseContext.value, "stop", recheckDelay, null, true)
   }
 
   const response = await sendPrompt(host, sessionID, continuationPrompt(target))

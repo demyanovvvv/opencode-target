@@ -16,6 +16,21 @@
 The package keeps `@opencode-ai/plugin` optional at runtime so a local self-contained plugin can
 be copied into OpenCode. It is a development dependency for the repository's smoke tests.
 
+The compact inline indicator requires the custom `session_prompt_status` host slot. Stock
+OpenCode 1.18.34 does not provide it; the server plugin remains independently usable.
+For the Windows host, clone OpenCode v1.18.34 into `.opencode-host` and run
+`node scripts/register-host-components.mjs`, then `node scripts/build-host.mjs`.
+The shared `host-components.json` records installed components and their versions. The build
+checks their files, reconstructs host extensions from upstream, and composes a stable display
+version: `1.18.34+patchline.1.2.0+target.0.5.0`, or one suffix when only one is present.
+These display versions are not SemVer strings when they contain multiple `+` signs.
+Target install/uninstall updates its own entry. Patchline installer integration is pending;
+run the registration helper again after changing the installed Patchline package. Installation
+of plugin files and successful host binary installation remain separate operations.
+Host binary installation is separate from `install.ps1`, which installs the Target plugins.
+This custom host suppresses stock binary upgrades to preserve its extensions; rebuild it
+explicitly when upgrading. Its build omits the embedded web UI.
+
 ## Local environment note
 
 The environment used during this documentation pass contained `@opencode-ai/plugin` `1.15.4`
@@ -50,6 +65,9 @@ npm run check
 - OpenCode messages, children, and prompt calls are bounded by `host_api_timeout_ms` (30 seconds
   by default). A timeout is surfaced as a typed host failure and follows the same retry/lifecycle
   handling as other transient OpenCode API failures.
+- The continuation watchdog measures absence of `session.idle` after asynchronous dispatch, not
+  UI health. Pending permission/question requests defer its check. It neither grants permissions
+  nor aborts the host and does not cover the initial slash-command turn.
 - Release validation installs `@opencode-ai/plugin@1.18.30`, OpenTUI core/solid/keymap `0.4.5`, and
   Solid `1.9.12` into a temporary project and imports the packed package. The host's peer set is
   pinned together so registry updates cannot select an incompatible OpenTUI generation.
