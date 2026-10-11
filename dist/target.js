@@ -7,6 +7,7 @@ import { mkdir, open, readFile, readdir, rename, rm, stat, unlink, writeFile } f
 import os from "node:os"
 import path from "node:path"
 import { promisify } from "node:util"
+import { fileURLToPath } from "node:url"
 const LOCK_STALE_MS = 15_000
 const LOCK_HEARTBEAT_MS = 5_000
 const LOCK_RETRY_MS = 25
@@ -2753,11 +2754,12 @@ function completionResponse(target) {
 }
 
 export const TargetPlugin = async ({ client, $, directory }, rawOptions = {}) => {
+  if (await shadowedByLocalInstall(import.meta.url, directory)) return {}
   const options = normalizePluginOptions({ ...rawOptions, worktree: rawOptions.worktree ?? directory ?? process.cwd() })
   const adapter = createOpenCodeAdapter(client, { timeoutMs: options.host_api_timeout_ms })
   const host = { adapter, client, pendingInput: new Map(), usageUpdates: new Map() }
   const scheduler = new SchedulerState()
-  const stateDir = options.state_dir ? String(options.state_dir) : defaultStateDir()
+  const stateDir = options.state_dir ? String(options.state_dir) : await installedStateDir(import.meta.url) || defaultStateDir()
   const commandName = String(options.command_name || "target")
   const aliasName = options.alias === false ? null : String(options.alias || "t")
   const autoContinue = options.auto_continue !== false
@@ -3038,5 +3040,38 @@ export const TargetPlugin = async ({ client, $, directory }, rawOptions = {}) =>
         }
       }
     },
+  }
+}
+
+
+// Installed plugins share metadata; manually copied plugins keep the legacy default.
+async function installedStateDir(moduleURL) {
+  const dir = path.dirname(fileURLToPath(moduleURL))
+  if (!["plugins", "tui-plugins"].includes(path.basename(dir))) return null
+  try {
+    const manifest = JSON.parse(await readFile(path.join(dir, "../target/package.json"), "utf8"))
+    if (manifest.name === "opencode-target" && manifest.stateDir === undefined) return null
+    if (manifest.name !== "opencode-target" || typeof manifest.stateDir !== "string" || !path.isAbsolute(manifest.stateDir)) {
+      throw new Error("Invalid Target installation metadata")
+    }
+    return manifest.stateDir
+  } catch (error) { if (error.code === "ENOENT") return null; throw error }
+}
+
+async function shadowedByLocalInstall(moduleURL, directory) {
+  if (!directory) return false
+  const installed = path.resolve(path.dirname(fileURLToPath(moduleURL)), "..")
+  let current = path.resolve(directory)
+  for (;;) {
+    const local = path.join(current, ".opencode")
+    if (local !== installed) {
+      try {
+        const manifest = JSON.parse(await readFile(path.join(local, "target/package.json"), "utf8"))
+        if (manifest.name === "opencode-target" && manifest.scope === "local") return true
+      } catch (error) { if (error.code !== "ENOENT") throw error }
+    } else return false
+    const parent = path.dirname(current)
+    if (parent === current) return false
+    current = parent
   }
 }

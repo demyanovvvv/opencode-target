@@ -6,7 +6,15 @@ Run `sh install.sh` or `powershell -ExecutionPolicy Bypass -File .\install.ps1` 
 Node.js 22+ is required. Both plugins and TUI registration are installed in one step, with no
 dependency installation or manual JSON editing. The generated installer bundles its JSONC parser.
 `OPENCODE_CONFIG_DIR` overrides the destination, followed by `XDG_CONFIG_HOME`; otherwise the
-destination is `~/.config/opencode`. `OPENCODE_TUI_CONFIG` selects an explicit TUI config file.
+global destination is `~/.config/opencode`. `OPENCODE_TUI_CONFIG` selects an explicit global TUI config file.
+Both install and uninstall wrappers prompt for local/global scope. Use `--local --project-dir <path>`
+or `--global` for Shell, and `-Local -ProjectDir <path>` or `-Global` for PowerShell to skip prompts.
+Local plugins and TUI config live in `<project>/.opencode`; local state is `.opencode/target/state`.
+`target/package.json` records installed version and state/config paths. Updates report old → new
+archive versions and preserve goals. Stop OpenCode and run `uninstall.sh` / `uninstall.ps1` (or
+Russian variants) with the same scope to remove plugins, registrations, metadata and scoped state.
+Legacy global goals remain global; local removal does not delete them. Explicitly shared custom
+state directories are removed when uninstalling an installation that uses them.
 
 The indicator uses stock `session_prompt_right` (upstream 1.18.34). Installation, updates and
 removal leave the OpenCode executable and unrelated extension metadata untouched. Existing
@@ -26,7 +34,7 @@ Installer file/config changes are protected by `.target-install.lock` and rolled
    %USERPROFILE%\.config\opencode\plugins\target.js
    ```
 
-2. The install scripts also copy the TUI plugin and automatically register it in the global
+2. The install scripts also copy the TUI plugin and automatically register it in the selected scope's
    `tui.json` or `tui.jsonc`. Confirm that `target.js` exists under the TUI plugin directory:
 
    ```text
@@ -47,13 +55,14 @@ Repeated installation preserves existing configuration and tuple options and doe
 duplicate plugin entries. It re-enables only `opencode-target-tui` when disabled. If both
 `tui.json` and `tui.jsonc` exist, registration goes into `tui.jsonc` while considering entries from
 both. Config parse errors stop the installer with a nonzero exit; repair the indicated file and
-rerun. Files may already have been copied when configuration fails.
+rerun. A failed installation restores the previous plugin and config bytes.
 
 Rerunning an installer replaces both plugin files with the archive's versions and reports an update.
 To uninstall completely, stop OpenCode and use `sh install.sh --uninstall` or
 `powershell -ExecutionPolicy Bypass -File .\install.ps1 -Uninstall`. This removes installed Target
-files, Target entries from all global JSON/JSONC server and TUI layers (plus an explicit TUI config),
-and saved Target state. Custom tuple `state_dir` and `OPENCODE_TARGET_STATE_DIR` are also removed.
+files, Target entries from the selected JSON/JSONC server and TUI layers (plus an explicit TUI config),
+installation metadata, and scoped saved Target state. Custom tuple `state_dir` paths are also removed;
+global removal uses the recorded system state path. Local removal keeps legacy global state.
 Configuration is validated before removal; unrelated plugin files and configuration are retained.
 
 The TUI indicator is display-only. It polls the local state file and never performs lifecycle

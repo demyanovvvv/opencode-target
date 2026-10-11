@@ -1,14 +1,22 @@
 # OpenCode Target
 
-[Русский](README.ru.md) · English
+[English](README.md) · [Русский](README.ru.md)
 
-[Releases](https://github.com/demyanovvvv/opencode-target/releases) · [Changelog](CHANGELOG.md)
+[Install](#installation) · [Update](#update) · [Uninstall](#uninstall) · [Commands](#commands) · [Options](#plugin-options) · [Troubleshooting](docs/operations.md)
 
-Latest release: **v0.5.0**
+[Releases](https://github.com/demyanovvvv/opencode-target/releases) · [Changelog](CHANGELOG.md) · [Compatibility](docs/compatibility.md) · [Architecture](docs/architecture.md) · [Issues](https://github.com/demyanovvvv/opencode-target/issues) · [MIT license](LICENSE)
 
-**Persistent, verified multi-turn objectives for OpenCode.**
+**OpenCode plugin for persistent goals, automatic continuation, token budgets, and evidence-based completion checks.**
 
-OpenCode Target is a standalone OpenCode plugin inspired by the architecture and behavior of Codex `/goal`. It is not a prompt alias. A Target is durable state with its own lifecycle, token/time accounting, automatic continuation loop, completion audit, budget enforcement, stale-write protection, and runaway-loop circuit breakers.
+Latest release: [**v0.6.0**](https://github.com/demyanovvvv/opencode-target/releases/tag/v0.6.0) · [Download archive](https://github.com/demyanovvvv/opencode-target/releases/download/v0.6.0/opencode-target-0.6.0.tgz)
+
+Target saves an objective outside the conversation history and starts another model turn while that
+objective remains active. It tracks token usage and elapsed active time, supports requirement evidence
+and explicitly requested verification commands, and stops on configured limits or repeated failures.
+An animated TUI indicator shows the current state and token usage. Inspired by Codex `/goal`.
+
+Completion is audited by the model using requirements and available evidence; Target does not guarantee
+that an objective will be achieved or automatically run every verification command.
 
 Primary command:
 
@@ -61,7 +69,10 @@ Choose the language for the installer output:
 
 ### Automatic installation — recommended
 
-With Node.js 22+ installed, download and extract the [v0.5.0 release archive](https://github.com/demyanovvvv/opencode-target/releases/tag/v0.5.0), then run one command from its directory:
+Requires Node.js 22+ and a compatible OpenCode version; see the [compatibility matrix](docs/compatibility.md).
+Download [opencode-target-0.6.0.tgz](https://github.com/demyanovvvv/opencode-target/releases/download/v0.6.0/opencode-target-0.6.0.tgz),
+extract it, and open the extracted `package` directory. Run the installer there; v0.6.0 includes
+local/global scope selection and standalone uninstallers in both languages.
 
 ```sh
 sh install.sh
@@ -73,18 +84,55 @@ Windows:
 powershell -ExecutionPolicy Bypass -File .\install.ps1
 ```
 
-### Update and uninstall
+### Choose local or global scope
 
-Run the installer again from the newer archive to update both plugins. Existing configuration
-options and saved Targets are preserved; the installer reports `Updated` when files already exist.
+Both installer and uninstaller offer **Local (project)** or **Global (user)** when launched without scope arguments.
+Local files go into `<project>/.opencode`; global files go into the user OpenCode config directory.
+The local menu asks for a project directory (default: the current directory, not the archive directory).
+For unattended runs (quote paths containing spaces):
+
+```sh
+sh install.sh --local --project-dir /path/to/project
+sh install.sh --global
+sh uninstall.sh --local --project-dir /path/to/project
+sh uninstall.sh --global
+```
+
+```powershell
+.\install.ps1 -Local -ProjectDir "C:\Projects\my-project"
+.\install.ps1 -Global
+.\uninstall.ps1 -Local -ProjectDir "C:\Projects\my-project"
+.\uninstall.ps1 -Global
+```
+
+### Update
+
+Stop OpenCode, download and extract the newer archive, then rerun its installer with the same scope
+and project directory. Both plugins are replaced. Existing configuration
+options and saved Targets are preserved; the installer reports the previous and archive versions,
+for example `Updated OpenCode Target: 0.5.0 → 0.6.0`. It installs the archive version without downloading another release.
 Restart OpenCode after updating.
 
-To completely uninstall, stop OpenCode, then run `sh install.sh --uninstall` on Linux/macOS or
-`powershell -ExecutionPolicy Bypass -File .\install.ps1 -Uninstall` on Windows. Russian installers
-accept the same flags. Removal deletes both plugin files, Target registrations in global server/TUI
-configuration, and saved Target state (including configured `state_dir` paths). Other plugins and
-settings are preserved. Environment overrides apply to removal as well.
+### Uninstall
 
+Stop OpenCode, then run `sh uninstall.sh` on Linux/macOS or
+`powershell -ExecutionPolicy Bypass -File .\uninstall.ps1` on Windows and select the installed scope.
+For compatibility, you can also use `sh install.sh --uninstall` on Linux/macOS or
+`powershell -ExecutionPolicy Bypass -File .\install.ps1 -Uninstall` on Windows. Russian installers
+accept the same flags. Separate `uninstall.sh` / `uninstall.ps1` and Russian variants are included.
+Removal deletes both plugin files, Target registrations in the selected server/TUI configuration,
+installation metadata, saved state, and empty plugin directories. Installer-created configs are
+removed only if no user settings or comments remain. Repeated removal succeeds.
+Other plugins and settings are preserved.
+
+Local installations keep goals in `<project>/.opencode/target/state`; global installations retain
+the existing system state directory, including legacy shared goals. Local removal never deletes
+that legacy global store by default. Installed server and TUI plugins share the stored state path;
+a local installation takes precedence over a global installation in its project.
+Explicit `state_dir` settings and `--state-dir` / `-StateDir` are supported; deliberately sharing
+a custom state directory also shares its deletion lifetime. Updates preserve the recorded state path.
+
+### Installer languages and configuration
 
 The installer prints its progress in English. To use the Russian installer instead, run:
 
@@ -109,11 +157,21 @@ files without duplicating the TUI entry and re-enables `opencode-target-tui` if 
 When both config files exist, registration is written to `tui.jsonc` (the higher-precedence file).
 Malformed config is reported as an installation error and is not overwritten.
 
-The destination respects `OPENCODE_CONFIG_DIR`, then `XDG_CONFIG_HOME`, then
+For global scope, the destination respects `OPENCODE_CONFIG_DIR`, then `XDG_CONFIG_HOME`, then
 `~/.config/opencode`. `OPENCODE_TUI_CONFIG` selects a custom TUI config file when set; the plugin
 path is made relative to that file. Project-specific overrides still follow OpenCode's precedence.
 
 ### Manual installation
+
+To install the current checkout with automatic scope selection, build the artifacts first:
+
+```sh
+npm ci
+npm run build:local
+```
+
+Then run the installer commands above. Manual copying below installs only the server plugin and
+uses the global default state store unless you explicitly configure `state_dir`.
 
 1. Copy `dist/target.js` into either:
 
@@ -152,8 +210,8 @@ The installer adds this TUI registration automatically. For manual installation,
 }
 ```
 
-The install scripts copy this artifact to `~/.config/opencode/tui-plugins/target.js` (or the
-equivalent Windows config directory) and automatically register it in the global `tui.json` or
+The install scripts copy this artifact to `<config-dir>/tui-plugins/target.js`, where `<config-dir>`
+is the selected project `.opencode` or user OpenCode directory, and register it in that scope's `tui.json` or
 `tui.jsonc`. Existing settings, comments, and plugin entries are preserved; repeating the
 installer is idempotent. Restart OpenCode after installation. The indicator is display-only;
 lifecycle control remains `/target pause`, `/target resume`, and the other Target commands.
@@ -163,7 +221,9 @@ use `.opencode/tui-plugins/target.js` and `.opencode/tui.json` with the same rel
 For a locally installed package, use `"plugin": ["opencode-target"]` in `tui.json`; the package's
 `./tui` entrypoint resolves to the generated indicator.
 
-The default state directory and `OPENCODE_TARGET_STATE_DIR` match the server plugin. If the server
+Automatic installations use the same stored state path for the server and indicator.
+Manually copied plugins use the global default state directory and `OPENCODE_TARGET_STATE_DIR`.
+If the server
 uses an explicit `state_dir`, supply the same **absolute** directory to the TUI plugin:
 
 ```json
@@ -489,6 +549,11 @@ While an active Target owns continuation, OpenCode's generic compaction auto-con
 
 ## Persistence
 
+Automatic local installation stores goals in `<project>/.opencode/target/state`.
+Automatic global installation records its state path in `<config-dir>/target/package.json`;
+updates keep that path. Both installed plugins read the same metadata.
+The following defaults apply to global installations and manually copied plugins without metadata.
+
 Default state location:
 
 Linux/macOS:
@@ -607,6 +672,7 @@ operator procedures are documented in:
 - [`docs/security.md`](docs/security.md)
 - [`docs/compatibility.md`](docs/compatibility.md)
 - [`docs/state-format.md`](docs/state-format.md)
+- [Repository description and GitHub Topics](docs/repository-metadata.md)
 
 The project also includes project-local OpenCode skills under `.opencode/skills/` for plugin
 development, verification, and documentation maintenance.

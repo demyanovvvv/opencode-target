@@ -1,7 +1,8 @@
 import assert from "node:assert/strict"
-import { mkdtemp, rm, writeFile } from "node:fs/promises"
+import { mkdtemp, mkdir, copyFile, symlink, rm, writeFile } from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
+import { pathToFileURL, fileURLToPath } from "node:url"
 import { createSignal } from "solid-js"
 import { testRender, createSolidSlotRegistry, createSlot, useRenderer } from "@opentui/solid"
 import { createTarget, readTarget, setStoppedStatus, targetPath } from "../src/core.js"
@@ -38,8 +39,16 @@ async function frameWith(text) {
 try {
   await createTarget(dir, "session", "Check rendered indicator", 120000)
   assert.equal(plugin.id, "opencode-target-tui")
+  // The installed indicator must use metadata without an explicit state_dir option.
+  const installed = path.join(dir, "installed")
+  await mkdir(path.join(installed, "tui-plugins"), { recursive: true })
+  await mkdir(path.join(installed, "target"))
+  await symlink(fileURLToPath(new URL("../node_modules", import.meta.url)), path.join(installed, "node_modules"), process.platform === "win32" ? "junction" : "dir")
+  await copyFile(new URL("../dist/target-tui.js", import.meta.url), path.join(installed, "tui-plugins/target.js"))
+  await writeFile(path.join(installed, "target/package.json"), JSON.stringify({ name: "opencode-target", scope: "local", stateDir: dir }))
+  const installedPlugin = (await import(pathToFileURL(path.join(installed, "tui-plugins/target.js")).href)).default
   assert.equal(plugin.server, undefined)
-  await plugin.tui(api, { state_dir: dir })
+  await installedPlugin.tui(api, {})
   assert.equal(slots.length, 1)
   assert.equal(typeof slots[0].slots.session_prompt_right, "function")
   screen = await testRender(() => {

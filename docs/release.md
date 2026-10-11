@@ -29,7 +29,8 @@ Confirm that:
 - `dist/target.js`, `dist/target-tui.js`, and the bundled installer helper contain the current
   source behavior;
 - installer scripts automatically register the TUI plugin without deleting existing TUI settings;
-- English and Russian installer variants are included in the release archive and smoke-tested;
+- English and Russian installer and uninstaller variants are included in the release archive and
+  smoke-tested for global/local scopes, interactive selection, updates and isolated state removal;
 - no state files, lock files, credentials, or local configuration are packaged.
 - two consecutive local builds produce the same generated artifact hash;
 - the packed tarball installs into a temporary project and contains no tests, state, lock files, or
@@ -42,24 +43,27 @@ published user-facing documentation instead.
 
 ## Publish or distribute
 
-Releases run through the manual `Release` GitHub Actions workflow
-(`.github/workflows/release.yml`). The package is private, so the workflow never publishes to npm.
+Releases are distributed through GitHub Releases. The package is private and is not published to npm.
+There is currently no release workflow in this checkout; use the verified local process below.
 
 1. Confirm `package.json` is private and its version matches the version you intend to release.
-2. Add the matching `## [<version>]` section to `CHANGELOG.md`; the workflow extracts it as the
+2. Add the matching `## [<version>]` section to `CHANGELOG.md`; the extraction script uses it as the
    release notes and fails if the section is missing or empty.
-3. Trigger the workflow from the Actions tab (`workflow_dispatch`) with the target `version`.
-4. Leave `dry_run` enabled to build and verify only. Disable it to upload the packed archive as a
-   workflow artifact **and** publish a GitHub release tagged `v<version>` with the tarball attached
-   and marked latest.
-5. The workflow requires the protected `release` environment, runs `npm run check` and
-   `npm run release:check`, then runs `npm pack` followed by the publish steps.
+3. Run `npm run release:check` and inspect the result; it builds, tests, checks deterministic output,
+   packs a temporary archive, installs it and exercises the bundled scripts.
+4. Run `npm pack --pack-destination <release-dir>` and
+   `node scripts/extract-changelog.mjs <version> <release-dir>/release-notes.md`.
+5. Commit the intended source, docs, version/lockfile and generated artifacts, then push the commit.
+6. Create and push tag `v<version>` at that exact verified commit.
+7. Publish with `gh release create v<version> <release-dir>/opencode-target-<version>.tgz
+   --verify-tag --title "v<version>" --notes-file <release-dir>/release-notes.md --latest`.
+8. Verify the published tag, release body, latest marker and attached archive before announcing it.
 
 For local archive distribution:
 
-1. Download the `opencode-target-<version>` workflow artifact, or run `npm pack` locally.
+1. Download `opencode-target-<version>.tgz` from the GitHub release, or run `npm pack` locally.
 2. Provide the packed archive containing both READMEs, `dist/target.js`, `dist/target-tui.js`, and
-    `dist/install-config.mjs` together with all four English and Russian install scripts.
+    `dist/install-config.mjs` together with all eight English and Russian install/uninstall scripts.
 3. Verify install scripts copy both plugins and register the indicator without a dependency install.
 4. Tell users to restart OpenCode and create a new session.
 

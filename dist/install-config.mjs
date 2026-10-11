@@ -1,7 +1,13 @@
 // OpenCode Target installer helper — generated from install-config.mjs. Do not edit.
 
+// installer-cli.mjs
+import path2 from "node:path";
+import os2 from "node:os";
+import { createInterface } from "node:readline/promises";
+import { fileURLToPath as fileURLToPath2 } from "node:url";
+
 // install-config.mjs
-import { access, mkdir, readFile, writeFile, rm, copyFile, lstat } from "node:fs/promises";
+import { access, mkdir, readFile, writeFile, rm, copyFile, lstat, rmdir } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -802,12 +808,12 @@ function parseTree(text, errors = [], options = ParseOptions.DEFAULT) {
   }
   return result;
 }
-function findNodeAtLocation(root, path2) {
+function findNodeAtLocation(root, path3) {
   if (!root) {
     return void 0;
   }
   let node = root;
-  for (let segment of path2) {
+  for (let segment of path3) {
     if (typeof segment === "string") {
       if (node.type !== "object" || !Array.isArray(node.children)) {
         return void 0;
@@ -1161,14 +1167,14 @@ function getNodeType(value) {
 
 // node_modules/jsonc-parser/lib/esm/impl/edit.js
 function setProperty(text, originalPath, value, options) {
-  const path2 = originalPath.slice();
+  const path3 = originalPath.slice();
   const errors = [];
   const root = parseTree(text, errors);
   let parent = void 0;
   let lastSegment = void 0;
-  while (path2.length > 0) {
-    lastSegment = path2.pop();
-    parent = findNodeAtLocation(root, path2);
+  while (path3.length > 0) {
+    lastSegment = path3.pop();
+    parent = findNodeAtLocation(root, path3);
     if (parent === void 0 && value !== void 0) {
       if (typeof lastSegment === "string") {
         value = { [lastSegment]: value };
@@ -1354,8 +1360,8 @@ var ParseErrorCode;
   ParseErrorCode2[ParseErrorCode2["InvalidEscapeCharacter"] = 15] = "InvalidEscapeCharacter";
   ParseErrorCode2[ParseErrorCode2["InvalidCharacter"] = 16] = "InvalidCharacter";
 })(ParseErrorCode || (ParseErrorCode = {}));
-function modify(text, path2, value, options) {
-  return setProperty(text, path2, value, options);
+function modify(text, path3, value, options) {
+  return setProperty(text, path3, value, options);
 }
 function applyEdits(text, edits) {
   let sortedEdits = edits.slice(0).sort((a, b) => {
@@ -1436,7 +1442,8 @@ function isTargetPlugin(value, configPath, configDir) {
       return false;
     }
   }
-  return path.resolve(path.dirname(configPath), value) === path.resolve(configDir, "tui-plugins", "target.js");
+  const resolved = path.resolve(path.dirname(configPath), value);
+  return ["plugins", "tui-plugins"].some((dir) => resolved === path.resolve(configDir, dir, "target.js"));
 }
 function applyModify(text, pathSegments, value) {
   const bom = text.startsWith("\uFEFF") ? "\uFEFF" : "";
@@ -1488,23 +1495,37 @@ async function configureTuiConfig({ configDir, tuiConfig = null }) {
   await writeFile(configPath, next, "utf8");
   return { changed: true, configPath };
 }
-async function uninstallTarget({ configDir, tuiConfig = null, stateDir = null }) {
+async function readManifest(configDir) {
+  try {
+    return JSON.parse(await readFile(path.join(configDir, "target/package.json"), "utf8"));
+  } catch (error) {
+    if (error.code === "ENOENT") return {};
+    throw error;
+  }
+}
+async function removeEmpty(dir) {
+  try {
+    await rmdir(dir);
+  } catch (error) {
+    if (!["ENOENT", "ENOTEMPTY", "EEXIST"].includes(error.code)) throw error;
+  }
+}
+async function uninstallTarget({ configDir, tuiConfig = null, stateDir = null, scope = "global" }) {
   configDir = path.resolve(configDir);
+  const manifest = await readManifest(configDir);
   const paths = [.../* @__PURE__ */ new Set([
     ...["opencode.json", "opencode.jsonc", "tui.json", "tui.jsonc"].map((name) => path.join(configDir, name)),
-    ...tuiConfig ? [path.resolve(tuiConfig)] : []
+    ...tuiConfig || manifest.tuiConfig ? [path.resolve(tuiConfig || manifest.tuiConfig)] : []
   ])];
   const layers = await Promise.all(paths.map(loadConfig));
-  const stateDirs = /* @__PURE__ */ new Set([path.resolve(stateDir || process.env.OPENCODE_TARGET_STATE_DIR || (process.platform === "win32" ? path.join(process.env.LOCALAPPDATA || path.join(os.homedir(), "AppData", "Local"), "opencode-target") : path.join(process.env.XDG_STATE_HOME || path.join(os.homedir(), ".local", "state"), "opencode-target")))]);
+  const stateDirs = /* @__PURE__ */ new Set([path.resolve(stateDir || manifest.stateDir || (scope === "local" ? path.join(configDir, "target/state") : process.env.OPENCODE_TARGET_STATE_DIR || (process.platform === "win32" ? path.join(process.env.LOCALAPPDATA || path.join(os.homedir(), "AppData", "Local"), "opencode-target") : path.join(process.env.XDG_STATE_HOME || path.join(os.homedir(), ".local", "state"), "opencode-target"))))]);
   const writes = [];
   for (const layer of layers) {
     let next = layer.original;
     const entries = layer.config.plugin || [];
     for (let index = entries.length - 1; index >= 0; index--) {
       const entry = entries[index];
-      const name = Array.isArray(entry) ? entry[0] : entry;
-      const isServer = typeof name === "string" && (name === "opencode-target" || name.startsWith("opencode-target@") || (name.startsWith("file:") ? fileURLToPath(name) : path.resolve(path.dirname(layer.configPath), name)) === path.join(configDir, "plugins", "target.js"));
-      if (!isServer && !isTargetPlugin(entry, layer.configPath, configDir)) continue;
+      if (!isTargetPlugin(entry, layer.configPath, configDir)) continue;
       if (Array.isArray(entry) && entry[1]?.state_dir) stateDirs.add(path.resolve(entry[1].state_dir));
       next = applyModify(next, ["plugin", index], void 0);
     }
@@ -1514,18 +1535,28 @@ async function uninstallTarget({ configDir, tuiConfig = null, stateDir = null })
     if (next !== layer.original) writes.push({ configPath: layer.configPath, text: next });
   }
   for (const dir of stateDirs) {
-    if (dir === path.parse(dir).root || dir === configDir || dir === os.homedir() || paths.some((file) => file === dir || file.startsWith(dir + path.sep))) {
+    if (dir === path.parse(dir).root || dir === configDir || dir === os.homedir() || configDir.startsWith(dir + path.sep) || ["plugins", "tui-plugins", "target"].some((name) => dir === path.join(configDir, name)) || paths.some((file) => file === dir || file.startsWith(dir + path.sep))) {
       throw new Error(`Refusing to remove unsafe state directory: ${dir}`);
     }
   }
-  for (const write of writes) await writeFile(write.configPath, write.text, "utf8");
+  for (const write of writes) {
+    const clean = parseJsonc(write.text);
+    const empty = Object.entries(clean).every(([key, value]) => key === "$schema" || key === "plugin" && value.length === 0 || key === "plugin_enabled" && Object.keys(value).length === 0);
+    if (empty && manifest.createdConfigs?.includes(write.configPath) && !/\/\/|\/\*/.test(write.text.replace(/"(?:\\.|[^"\\])*"/g, ""))) await rm(write.configPath);
+    else await writeFile(write.configPath, write.text, "utf8");
+  }
   await rm(path.join(configDir, "plugins", "target.js"), { force: true });
   await rm(path.join(configDir, "tui-plugins", "target.js"), { force: true });
   for (const dir of stateDirs) await rm(dir, { recursive: true, force: true });
+  await rm(path.join(configDir, "target/package.json"), { force: true });
+  for (const name of ["plugins", "tui-plugins", "target"]) await removeEmpty(path.join(configDir, name));
 }
-async function installTargetFiles({ configDir, root, tuiConfig = null, uninstall = false, stateDir = null }) {
+async function installTargetFiles({ configDir, root, tuiConfig = null, uninstall = false, stateDir = null, scope = "global" }) {
   configDir = path.resolve(configDir);
+  if (!["local", "global"].includes(scope)) throw new Error("Invalid installation scope");
   return withInstallLock(configDir, async () => {
+    const manifest = await readManifest(configDir);
+    tuiConfig ||= manifest.tuiConfig || null;
     const owned = ["opencode.json", "opencode.jsonc", "tui.json", "tui.jsonc", "plugins/target.js", "tui-plugins/target.js", "target/package.json"];
     if (tuiConfig) owned.push(path.resolve(tuiConfig));
     const snapshots = [];
@@ -1541,28 +1572,34 @@ async function installTargetFiles({ configDir, root, tuiConfig = null, uninstall
     }
     try {
       if (uninstall) {
-        const quarantine = path.join(configDir, `.target-state-transition-${process.pid}`);
-        await uninstallTarget({ configDir, tuiConfig, stateDir: quarantine });
+        await uninstallTarget({ configDir, tuiConfig, stateDir, scope });
       } else {
         for (const [source, destination] of [["target.js", "plugins/target.js"], ["target-tui.js", "tui-plugins/target.js"]]) {
           await mkdir(path.dirname(path.join(configDir, destination)), { recursive: true });
           await copyFile(path.join(root, "dist", source), path.join(configDir, destination));
         }
         await configureTuiConfig({ configDir, tuiConfig });
-        const version = true ? "0.5.0" : JSON.parse(await readFile(path.join(root, "package.json"), "utf8")).version;
+        const version = true ? "0.6.0" : JSON.parse(await readFile(path.join(root, "package.json"), "utf8")).version;
         await mkdir(path.join(configDir, "target"), { recursive: true });
-        await writeFile(path.join(configDir, "target/package.json"), JSON.stringify({ name: "opencode-target", version }) + "\n");
-      }
-      if (uninstall) {
-        await rm(path.join(configDir, "target/package.json"), { force: true });
-        await uninstallTarget({ configDir, tuiConfig, stateDir });
+        const configPaths = ["opencode.json", "opencode.jsonc", "tui.json", "tui.jsonc"].map((name) => path.join(configDir, name));
+        if (tuiConfig) configPaths.push(path.resolve(tuiConfig));
+        const layers = await Promise.all([...new Set(configPaths)].map(loadConfig));
+        const configuredState = layers.flatMap((layer) => (layer.config.plugin || []).filter((entry) => Array.isArray(entry) && isTargetPlugin(entry, layer.configPath, configDir)).map((entry) => entry[1]?.state_dir)).find(Boolean);
+        const installedState = path.resolve(configuredState || stateDir || manifest.stateDir || (scope === "local" ? path.join(configDir, "target/state") : process.env.OPENCODE_TARGET_STATE_DIR || (process.platform === "win32" ? path.join(process.env.LOCALAPPDATA || path.join(os.homedir(), "AppData", "Local"), "opencode-target") : path.join(process.env.XDG_STATE_HOME || path.join(os.homedir(), ".local", "state"), "opencode-target"))));
+        const configPath = tuiConfig ? path.resolve(tuiConfig) : await selectTuiConfigPath(configDir);
+        const createdConfigs = [.../* @__PURE__ */ new Set([...manifest.createdConfigs || [], ...snapshots.filter((s) => s.bytes === null && s.file === configPath).map((s) => s.file)])];
+        await writeFile(path.join(configDir, "target/package.json"), JSON.stringify({ name: "opencode-target", version, scope, stateDir: installedState, tuiConfig: tuiConfig ? path.resolve(tuiConfig) : null, createdConfigs }) + "\n");
+        return { version, previousVersion: manifest.version || null, configDir };
       }
     } catch (error) {
       const failures = [];
       for (const snapshot of snapshots.reverse()) {
         try {
           if (snapshot.bytes === null) await rm(snapshot.file, { force: true });
-          else await writeFile(snapshot.file, snapshot.bytes);
+          else {
+            await mkdir(path.dirname(snapshot.file), { recursive: true });
+            await writeFile(snapshot.file, snapshot.bytes);
+          }
         } catch (rollbackError) {
           failures.push(rollbackError);
         }
@@ -1572,26 +1609,62 @@ async function installTargetFiles({ configDir, root, tuiConfig = null, uninstall
     }
   });
 }
-if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  const args = process.argv.slice(2);
-  const value = (name) => {
-    const index = args.indexOf(name);
-    return index === -1 ? null : args[index + 1];
+
+// installer-cli.mjs
+async function runInstaller(args, root) {
+  const ru = args.includes("--ru");
+  const uninstall = args.includes("--uninstall");
+  const value = (flag) => {
+    const i = args.indexOf(flag);
+    if (i < 0) return null;
+    if (!args[i + 1] || args[i + 1].startsWith("--")) throw new Error(`Missing value for ${flag}`);
+    return args[i + 1];
   };
-  const configDir = value("--config-dir") || process.env.OPENCODE_CONFIG_DIR || path.join(process.env.XDG_CONFIG_HOME || path.join(os.homedir(), ".config"), "opencode");
-  if (args.includes("--install-files") || args.includes("--uninstall")) {
-    await installTargetFiles({ configDir, root: path.resolve(path.dirname(fileURLToPath(import.meta.url)), ".."), tuiConfig: value("--tui-config") || process.env.OPENCODE_TUI_CONFIG || null, uninstall: args.includes("--uninstall"), stateDir: value("--state-dir") });
-    console.log(`${args.includes("--uninstall") ? "Removed" : "Installed"} OpenCode Target in ${configDir}`);
-  } else {
-    const result = await configureTuiConfig({ configDir, tuiConfig: value("--tui-config") || process.env.OPENCODE_TUI_CONFIG || null });
-    console.log(`${result.changed ? "Configured" : "Already configured"} TUI Target plugin in ${result.configPath}`);
+  const allowed = /* @__PURE__ */ new Set(["--ru", "--uninstall", "--install-files", "--local", "--global", "--project-dir", "--config-dir", "--tui-config", "--state-dir"]);
+  for (let i = 0; i < args.length; i++) {
+    if (!allowed.has(args[i])) throw new Error(`Unknown argument: ${args[i]}`);
+    if (["--project-dir", "--config-dir", "--tui-config", "--state-dir"].includes(args[i])) {
+      value(args[i]);
+      i++;
+    }
+  }
+  if (args.includes("--local") && args.includes("--global")) throw new Error("Choose one scope");
+  let scope = args.includes("--local") ? "local" : args.includes("--global") || value("--config-dir") ? "global" : null;
+  let project = value("--project-dir");
+  if (!scope) {
+    const rl = createInterface({ input: process.stdin, output: process.stdout });
+    const lines = rl[Symbol.asyncIterator]();
+    const ask = async (prompt) => {
+      process.stdout.write(prompt);
+      const answer = await lines.next();
+      if (answer.done) throw new Error(ru ? "\u0423\u043A\u0430\u0436\u0438\u0442\u0435 --local \u0438\u043B\u0438 --global" : "Specify --local or --global");
+      return answer.value.trim();
+    };
+    try {
+      console.log(ru ? "1. \u041B\u043E\u043A\u0430\u043B\u044C\u043D\u043E (\u0434\u043B\u044F \u043F\u0440\u043E\u0435\u043A\u0442\u0430)\n2. \u0413\u043B\u043E\u0431\u0430\u043B\u044C\u043D\u043E (\u0434\u043B\u044F \u043F\u043E\u043B\u044C\u0437\u043E\u0432\u0430\u0442\u0435\u043B\u044F)" : "1. Local (project)\n2. Global (user)");
+      const answer = await ask(ru ? "\u0412\u044B\u0431\u0435\u0440\u0438\u0442\u0435 \u043E\u0431\u043B\u0430\u0441\u0442\u044C [1/2]: " : "Choose scope [1/2]: ");
+      if (!["1", "2"].includes(answer)) throw new Error(ru ? "\u0412\u044B\u0431\u0435\u0440\u0438\u0442\u0435 1 \u0438\u043B\u0438 2" : "Choose 1 or 2");
+      scope = answer === "1" ? "local" : "global";
+      if (scope === "local" && !project) project = await ask(ru ? `\u041A\u0430\u0442\u0430\u043B\u043E\u0433 \u043F\u0440\u043E\u0435\u043A\u0442\u0430 [${process.cwd()}]: ` : `Project directory [${process.cwd()}]: `) || process.cwd();
+    } finally {
+      rl.close();
+    }
+  }
+  if (scope === "global" && project) throw new Error("--project-dir requires --local");
+  if (scope === "local" && value("--config-dir")) throw new Error("--config-dir cannot be combined with --local");
+  const configDir = scope === "local" ? path2.resolve(project || process.cwd(), ".opencode") : path2.resolve(value("--config-dir") || process.env.OPENCODE_CONFIG_DIR || path2.join(process.env.XDG_CONFIG_HOME || path2.join(os2.homedir(), ".config"), "opencode"));
+  const tuiConfig = value("--tui-config") || (scope === "global" ? process.env.OPENCODE_TUI_CONFIG : null);
+  console.log(`${scope}: ${configDir}`);
+  const result = await installTargetFiles({ configDir, root, scope, tuiConfig, stateDir: value("--state-dir"), uninstall });
+  if (uninstall) console.log(ru ? "OpenCode Target \u043F\u043E\u043B\u043D\u043E\u0441\u0442\u044C\u044E \u0443\u0434\u0430\u043B\u0451\u043D \u0438\u0437 \u0432\u044B\u0431\u0440\u0430\u043D\u043D\u043E\u0439 \u043E\u0431\u043B\u0430\u0441\u0442\u0438." : "Removed OpenCode Target completely from the selected scope.");
+  else {
+    console.log(`${ru ? result.previousVersion ? "\u041E\u0431\u043D\u043E\u0432\u043B\u0451\u043D" : "\u0423\u0441\u0442\u0430\u043D\u043E\u0432\u043B\u0435\u043D" : result.previousVersion ? "Updated" : "Installed"} OpenCode Target: ${result.previousVersion ? result.previousVersion + " \u2192 " : ""}${result.version}`);
+    console.log(ru ? "\u041F\u0435\u0440\u0435\u0437\u0430\u043F\u0443\u0441\u0442\u0438\u0442\u0435 OpenCode \u0438 \u0441\u043E\u0437\u0434\u0430\u0439\u0442\u0435 \u043D\u043E\u0432\u0443\u044E \u0441\u0435\u0441\u0441\u0438\u044E." : "Restart OpenCode and start a new session.");
   }
 }
+if (process.argv[1] && path2.resolve(process.argv[1]) === fileURLToPath2(import.meta.url)) {
+  await runInstaller(process.argv.slice(2), path2.resolve(path2.dirname(fileURLToPath2(import.meta.url)), ".."));
+}
 export {
-  TUI_PLUGIN_ID,
-  configureTuiConfig,
-  installTargetFiles,
-  parseJsonc,
-  selectTuiConfigPath,
-  uninstallTarget
+  runInstaller
 };

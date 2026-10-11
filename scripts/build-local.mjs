@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url"
 const here = path.dirname(fileURLToPath(import.meta.url))
 const root = path.resolve(here, "..")
 let core = await readFile(path.join(root, "src/core.js"), "utf8")
+let installState = await readFile(path.join(root, "src/install-state.js"), "utf8")
 let server = await readFile(path.join(root, "src/server.js"), "utf8")
 let store = await readFile(path.join(root, "src/store.js"), "utf8")
 let ledger = await readFile(path.join(root, "src/ledger.js"), "utf8")
@@ -30,6 +31,7 @@ const internalize = (source) => source
   .replace(/^export\s+/gm, "")
 
 store = internalize(store)
+installState = internalize(installState)
 ledger = internalize(ledger)
 adapter = internalize(adapter)
 scheduler = internalize(scheduler)
@@ -59,8 +61,9 @@ import { mkdir, open, readFile, readdir, rename, rm, stat, unlink, writeFile } f
 import os from "node:os"
 import path from "node:path"
 import { promisify } from "node:util"
+import { fileURLToPath } from "node:url"
 `
 const output = `${banner}${store.trim()}\n\n${ledger.trim()}\n\n${adapter.trim()}\n\n${scheduler.trim()}\n\n${traversal.trim()}\n\n${repository.trim()}\n\n${verification.trim()}\n\n${continuation.trim()}\n\n${options.trim()}\n\n${host.trim()}\n\n${errors.trim()}\n\n${eventRouting.trim()}\n\n${errorLifecycle.trim()}\n\n${toolAccounting.trim()}\n\n${contextHooks.trim()}\n\n${commands.trim()}\n\n${core.trim()}\n\n${verificationGate.trim()}\n\n${server.trim()}\n`
 await mkdir(path.join(root, "dist"), { recursive: true })
-await writeFile(path.join(root, "dist/target.js"), output)
+await writeFile(path.join(root, "dist/target.js"), output + "\n" + installState)
 console.log("built dist/target.js")

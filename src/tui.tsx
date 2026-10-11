@@ -2,6 +2,7 @@
 import { createEffect, createMemo, createSignal, onCleanup, Show } from "solid-js"
 import { useTerminalDimensions } from "@opentui/solid"
 import type { TuiPlugin, TuiPluginApi, TuiPluginModule } from "@opencode-ai/plugin/tui"
+import { installedStateDir, shadowedByLocalInstall } from "./install-state.js"
 import { createTargetObserver, indicatorView, readIndicatorState, resolveIndicatorStateDir } from "./tui-state.js"
 
 const id = "opencode-target-tui"
@@ -61,7 +62,8 @@ function TargetIndicator(props: { api: TuiPluginApi; stateDir: string; sessionID
 }
 
 const tui: TuiPlugin = async (api, options) => {
-  const stateDir = resolveIndicatorStateDir(options)
+  if (await shadowedByLocalInstall(import.meta.url, api.state.path?.directory)) return
+  const stateDir = options?.state_dir ? resolveIndicatorStateDir(options) : await installedStateDir(import.meta.url) || resolveIndicatorStateDir(options)
   api.slots.register({
     order: 50,
     slots: {

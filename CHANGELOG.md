@@ -5,6 +5,61 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] - 2026-10-11
+
+Persistent goals for OpenCode with automatic continuation, token budgets, and evidence-based completion checks.
+This release adds scoped installation, archive updates, and complete scoped removal, and ships
+the stock OpenCode TUI indicator without rebuilding the host executable.
+
+### Added
+
+- Installers and uninstallers offer local/project or global/user scope, with unattended scope flags.
+- Archive updates report old and new versions and preserve scoped state and JSONC settings.
+- Local installations isolate goals and take precedence over global plugins in their project.
+- Full uninstall removes installation metadata, scoped goals, registrations and empty owned files/directories.
+- Include standalone English/Russian uninstall scripts in release packages and verify both scopes.
+
+### Changed
+
+- Use the stock `session_prompt_right` TUI slot with compact status, animation and token usage.
+- Account for token usage incrementally at tool boundaries and across descendant sessions.
+- Replace host build/coordination integration with self-contained server and TUI plugins.
+- Refresh English/Russian documentation, navigation, repository description and relevant topics.
+
+### Fixed
+
+- Prevent overlapping automatic prompts and cancel timed-out prompt transport.
+- Preserve custom state paths during uninstall and support legacy version-only installation metadata.
+- Resolve the same installation state path for both server and TUI; local installations suppress
+  global plugin hooks and indicators in their project.
+
+### Install, update and uninstall
+
+Requires Node.js 22+ and compatible OpenCode; see the [compatibility matrix](https://github.com/demyanovvvv/opencode-target/blob/v0.6.0/docs/compatibility.md).
+Download the attached `opencode-target-0.6.0.tgz`, extract it and open the `package` directory.
+
+```sh
+sh install.sh
+# Russian output: sh install.ru.sh
+```
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\install.ps1
+# Russian output: use .\install.ru.ps1
+```
+
+Choose local/project or global/user scope. For unattended installation, pass `--local --project-dir <path>`
+or `--global` on Shell; `-Local -ProjectDir <path>` or `-Global` on PowerShell.
+To update, stop OpenCode and run this archive's installer with the same scope; settings and goals remain.
+To remove, stop OpenCode and run `uninstall.sh` / `uninstall.ps1` (or Russian variants) with that scope.
+Local goals live in `<project>/.opencode/target/state`; legacy shared goals remain global.
+Restart OpenCode and start a new session after installation or update.
+
+[English instructions](https://github.com/demyanovvvv/opencode-target/blob/v0.6.0/README.md) ·
+[Русская инструкция](https://github.com/demyanovvvv/opencode-target/blob/v0.6.0/README.ru.md)
+
+**Full changelog:** https://github.com/demyanovvvv/opencode-target/compare/v0.5.0...v0.6.0
+
 ## [0.5.0] - 2026-09-30
 
 This release adds separate English and Russian installation paths for OpenCode Target.
@@ -137,6 +192,7 @@ or the [Russian README](https://github.com/demyanovvvv/opencode-target/blob/v0.4
   accounting, automatic continuation loop, completion audit, budget enforcement, stale-write
   protection, descendant-session accounting, verification gates, and runaway-loop circuit breakers.
 
+[0.6.0]: https://github.com/demyanovvvv/opencode-target/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/demyanovvvv/opencode-target/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/demyanovvvv/opencode-target/compare/v0.3.0...v0.4.0
 [0.2.0]: https://github.com/demyanovvvv/opencode-target/compare/v0.1.1...v0.2.0

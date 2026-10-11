@@ -1,4 +1,5 @@
 import { tool } from "@opencode-ai/plugin"
+import { installedStateDir, shadowedByLocalInstall } from "./install-state.js"
 import { createGitAdapter, createOpenCodeAdapter } from "./adapter.js"
 import { SchedulerState } from "./scheduler.js"
 import { runContinuationPhases } from "./continuation.js"
@@ -302,11 +303,12 @@ function completionResponse(target) {
 }
 
 export const TargetPlugin = async ({ client, $, directory }, rawOptions = {}) => {
+  if (await shadowedByLocalInstall(import.meta.url, directory)) return {}
   const options = normalizePluginOptions({ ...rawOptions, worktree: rawOptions.worktree ?? directory ?? process.cwd() })
   const adapter = createOpenCodeAdapter(client, { timeoutMs: options.host_api_timeout_ms })
   const host = { adapter, client, pendingInput: new Map(), usageUpdates: new Map() }
   const scheduler = new SchedulerState()
-  const stateDir = options.state_dir ? String(options.state_dir) : defaultStateDir()
+  const stateDir = options.state_dir ? String(options.state_dir) : await installedStateDir(import.meta.url) || defaultStateDir()
   const commandName = String(options.command_name || "target")
   const aliasName = options.alias === false ? null : String(options.alias || "t")
   const autoContinue = options.auto_continue !== false

@@ -1,7 +1,7 @@
 {
   "name": "opencode-target",
-  "version": "0.5.0",
-  "description": "Persistent verified Target runtime for OpenCode with automatic continuation, budgets, circuit breakers, and an animated TUI status indicator.",
+  "version": "0.6.0",
+  "description": "OpenCode plugin for persistent goals, automatic continuation, token budgets, and evidence-based completion checks.",
   "private": true,
   "type": "module",
   "main": "./src/server.js",
@@ -34,16 +34,24 @@
     "install.sh",
     "install.ps1",
     "install.ru.sh",
-    "install.ru.ps1"
+    "install.ru.ps1",
+    "uninstall.sh",
+    "uninstall.ps1",
+    "uninstall.ru.sh",
+    "uninstall.ru.ps1"
   ],
   "keywords": [
     "opencode",
-    "plugin",
-    "target",
+    "opencode-plugin",
+    "coding-agent",
     "goal",
-    "agent",
-    "autonomous",
-    "continuation"
+    "target",
+    "persistent-state",
+    "automatic-continuation",
+    "token-budget",
+    "token-accounting",
+    "verification",
+    "tui"
   ],
   "peerDependencies": {
     "@opencode-ai/plugin": ">=1.18.30 <2.0.0",

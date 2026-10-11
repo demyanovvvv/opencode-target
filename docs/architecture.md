@@ -65,6 +65,14 @@ the Target, releases its scheduler lease, and leaves the durable objective intac
 
 ## Plugin configuration boundary
 
+Installed server and TUI plugins read a shared installation manifest to resolve state storage.
+Local archives use `.opencode/target/state`; global archives retain the legacy system state store.
+Explicit plugin state options override metadata. A global plugin yields to a local installation
+found along the project directory ancestry, avoiding duplicate hooks and indicators.
+Installation/update uses a per-config-directory lock and byte snapshots for file/config rollback.
+Removal validates every config and state path before editing, collects custom state paths before
+removing registrations, and prunes only empty owned directories and unmodified generated configs.
+
 `normalizePluginOptions` owns validation and defaulting for the public plugin configuration. The
 server integration consumes one frozen, normalized options object; lifecycle code does not parse
 raw configuration values while a hook is running. Verification gate definitions and retry

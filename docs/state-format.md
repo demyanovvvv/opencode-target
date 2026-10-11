@@ -8,7 +8,13 @@ Linux/macOS: ~/.local/state/opencode-target/targets/<encoded-session>.json
 Windows:     %LOCALAPPDATA%\opencode-target\targets\<encoded-session>.json
 ```
 
-The state directory can be overridden with `OPENCODE_TARGET_STATE_DIR`.
+The global default state directory can be overridden with `OPENCODE_TARGET_STATE_DIR`.
+Automatic local installations instead use `<project>/.opencode/target/state`.
+The installer records the selected state path, scope, version, custom TUI config path and owned
+config files in `<config-dir>/target/package.json`. Both installed plugins resolve the same path
+from this metadata; explicit plugin `state_dir` options take precedence. Updates retain the path.
+Legacy shared state remains global; local installation does not copy or delete those goals.
+Manually copied plugins without installation metadata keep the defaults above.
 
 Malformed or schema-invalid state is never treated as an absent Target. The runtime atomically
 moves it to `<state_dir>/corrupt/<original>.<timestamp>.<id>.corrupt` and reports

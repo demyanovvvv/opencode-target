@@ -11,7 +11,7 @@ for (const name of ["host-components.mjs", "host-build.mjs", "host-runtime.mjs",
 }
 await build({
   absWorkingDir: root,
-  entryPoints: ["install-config.mjs"],
+  entryPoints: ["installer-cli.mjs"],
   outfile: "dist/install-config.mjs",
   bundle: true,
   format: "esm",

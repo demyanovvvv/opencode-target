@@ -99,7 +99,7 @@ try {
   await runNode(["--check", "node_modules/opencode-target/dist/install-config.mjs"], temp, { quiet: true })
   await runNode(["test/install-script-smoke.mjs", path.join(temp, "node_modules", "opencode-target")])
   const installed = await readdir(path.join(temp, "node_modules", "opencode-target"))
-  for (const required of ["README.md", "README.ru.md", "dist", "src", "docs", "install.sh", "install.ps1"]) {
+  for (const required of ["README.md", "README.ru.md", "dist", "src", "docs", "install.sh", "install.ps1", "install.ru.sh", "install.ru.ps1", "uninstall.sh", "uninstall.ps1", "uninstall.ru.sh", "uninstall.ru.ps1"]) {
     if (!installed.includes(required)) throw new Error(`Package is missing ${required}.`)
   }
   for (const forbidden of ["test", ".opencode", "node_modules"]) {

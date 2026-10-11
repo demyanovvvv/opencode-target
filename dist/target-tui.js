@@ -12,25 +12,64 @@ import { createElement as _$createElement } from "@opentui/solid";
 import { createEffect, createMemo, createSignal, onCleanup, Show } from "solid-js";
 import { useTerminalDimensions } from "@opentui/solid";
 
-// src/tui-state.js
+// src/install-state.js
 import { readFile } from "node:fs/promises";
-import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
+async function installedStateDir(moduleURL) {
+  const dir = path.dirname(fileURLToPath(moduleURL));
+  if (!["plugins", "tui-plugins"].includes(path.basename(dir))) return null;
+  try {
+    const manifest = JSON.parse(await readFile(path.join(dir, "../target/package.json"), "utf8"));
+    if (manifest.name === "opencode-target" && manifest.stateDir === void 0) return null;
+    if (manifest.name !== "opencode-target" || typeof manifest.stateDir !== "string" || !path.isAbsolute(manifest.stateDir)) {
+      throw new Error("Invalid Target installation metadata");
+    }
+    return manifest.stateDir;
+  } catch (error) {
+    if (error.code === "ENOENT") return null;
+    throw error;
+  }
+}
+async function shadowedByLocalInstall(moduleURL, directory) {
+  if (!directory) return false;
+  const installed = path.resolve(path.dirname(fileURLToPath(moduleURL)), "..");
+  let current = path.resolve(directory);
+  for (; ; ) {
+    const local = path.join(current, ".opencode");
+    if (local !== installed) {
+      try {
+        const manifest = JSON.parse(await readFile(path.join(local, "target/package.json"), "utf8"));
+        if (manifest.name === "opencode-target" && manifest.scope === "local") return true;
+      } catch (error) {
+        if (error.code !== "ENOENT") throw error;
+      }
+    } else return false;
+    const parent = path.dirname(current);
+    if (parent === current) return false;
+    current = parent;
+  }
+}
+
+// src/tui-state.js
+import { readFile as readFile2 } from "node:fs/promises";
+import os from "node:os";
+import path2 from "node:path";
 var TARGET_STATUSES = ["active", "paused", "blocked", "usage_limited", "budget_limited", "complete"];
 function defaultStateDir(env = process.env, platform = process.platform) {
-  if (env.OPENCODE_TARGET_STATE_DIR) return path.resolve(env.OPENCODE_TARGET_STATE_DIR);
-  if (platform === "win32") return path.join(env.LOCALAPPDATA || path.join(os.homedir(), "AppData", "Local"), "opencode-target");
-  return path.join(env.XDG_STATE_HOME || path.join(os.homedir(), ".local", "state"), "opencode-target");
+  if (env.OPENCODE_TARGET_STATE_DIR) return path2.resolve(env.OPENCODE_TARGET_STATE_DIR);
+  if (platform === "win32") return path2.join(env.LOCALAPPDATA || path2.join(os.homedir(), "AppData", "Local"), "opencode-target");
+  return path2.join(env.XDG_STATE_HOME || path2.join(os.homedir(), ".local", "state"), "opencode-target");
 }
 function targetPath(stateDir, sessionID) {
-  return path.join(stateDir, "targets", `${Buffer.from(String(sessionID)).toString("base64url")}.json`);
+  return path2.join(stateDir, "targets", `${Buffer.from(String(sessionID)).toString("base64url")}.json`);
 }
 function resolveIndicatorStateDir(options = {}) {
-  return options.state_dir ? path.resolve(String(options.state_dir)) : defaultStateDir();
+  return options.state_dir ? path2.resolve(String(options.state_dir)) : defaultStateDir();
 }
 async function readIndicatorState(stateDir, sessionID, { signal } = {}) {
   try {
-    const target = JSON.parse(await readFile(targetPath(stateDir, sessionID), { encoding: "utf8", signal }));
+    const target = JSON.parse(await readFile2(targetPath(stateDir, sessionID), { encoding: "utf8", signal }));
     if (!target || ![2, 3].includes(target.version) || target.sessionID !== sessionID || typeof target.targetID !== "string" || !target.targetID || !TARGET_STATUSES.includes(target.status) || target.tokensUsed != null && (!Number.isSafeInteger(target.tokensUsed) || target.tokensUsed < 0) || target.tokenBudget != null && (!Number.isSafeInteger(target.tokenBudget) || target.tokenBudget <= 0)) {
       return { kind: "unavailable" };
     }
@@ -202,7 +241,8 @@ function TargetIndicator(props) {
   })();
 }
 var tui = async (api, options) => {
-  const stateDir = resolveIndicatorStateDir(options);
+  if (await shadowedByLocalInstall(import.meta.url, api.state.path?.directory)) return;
+  const stateDir = options?.state_dir ? resolveIndicatorStateDir(options) : await installedStateDir(import.meta.url) || resolveIndicatorStateDir(options);
   api.slots.register({
     order: 50,
     slots: {
