@@ -5,6 +5,67 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0] - 2026-10-16
+
+Automatic native context compaction for active Targets. Set a token or percentage threshold,
+and Target requests OpenCode's standard `/compact` while preserving the full durable objective.
+
+### Added
+
+- `/target context 100k` and `/target context 70%` (also `/t context`) to enable threshold-driven
+  native compaction for the active root Target. Token units, cached context and model-window
+  changes are supported independently of the cumulative Target token budget.
+- `context on`, `off`, `status` and `reset`, plus `context default` settings for new sessions.
+  Session settings survive restart and goal clearing; the feature starts disabled.
+- Durable request fences, bounded retries, restart reconciliation and diagnostic events.
+  Manual compaction is observed, pending requests gate continuation, and undersized thresholds
+  cannot cause an immediate compaction loop.
+- Source and generated-plugin integration coverage for one compaction followed by one configured
+  continuation, including the native compaction hooks and disabled automatic continuation.
+
+### Fixed
+
+- Import system-policy and compaction-context helpers in the source server plugin so durable
+  Target preservation works consistently in package and self-contained installations.
+- Exclude compaction summaries from work-progress streaks and pending automatic-turn classification
+  while retaining their normal token accounting.
+- Prevent budget wrap-up prompts from overlapping a pending compaction request.
+
+### Install or update
+
+Requires Node.js 22+ and compatible OpenCode; see the [compatibility matrix](https://github.com/demyanovvvv/opencode-target/blob/v0.7.0/docs/compatibility.md).
+Download the attached `opencode-target-0.7.0.tgz`, extract it and open the `package` directory.
+
+**Linux / macOS:**
+
+```sh
+sh install.sh
+```
+
+**Windows PowerShell:**
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\install.ps1
+```
+
+Choose the existing local or global scope when updating. Unattended global update:
+`sh install.sh --global` or `powershell -ExecutionPolicy Bypass -File .\install.ps1 -Global`.
+Goals, scoped state paths and unrelated settings are preserved. Restart OpenCode after updating.
+
+Enable in the current dialogue with `/target context 100k` (or `70%`). Use
+`/target context default 100k` for future sessions, and `/target context reset` to apply defaults
+to an existing dialogue. No summary profile is needed: OpenCode generates its standard summary.
+`context off` leaves OpenCode's own overflow compaction enabled.
+
+Verification: 176 tests, all smoke suites, source/generated integration checks, deterministic
+build and isolated archive installation. Provider-facing behavior is covered by a controlled host
+client and the tagged OpenCode API contract, not a live provider run.
+
+[English instructions](https://github.com/demyanovvvv/opencode-target/blob/v0.7.0/README.md) ·
+[Русская инструкция](https://github.com/demyanovvvv/opencode-target/blob/v0.7.0/README.ru.md)
+
+**Full changelog:** https://github.com/demyanovvvv/opencode-target/compare/v0.6.0...v0.7.0
+
 ## [0.6.0] - 2026-10-11
 
 Persistent goals for OpenCode with automatic continuation, token budgets, and evidence-based completion checks.
@@ -192,6 +253,7 @@ or the [Russian README](https://github.com/demyanovvvv/opencode-target/blob/v0.4
   accounting, automatic continuation loop, completion audit, budget enforcement, stale-write
   protection, descendant-session accounting, verification gates, and runaway-loop circuit breakers.
 
+[0.7.0]: https://github.com/demyanovvvv/opencode-target/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/demyanovvvv/opencode-target/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/demyanovvvv/opencode-target/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/demyanovvvv/opencode-target/compare/v0.3.0...v0.4.0

@@ -2,6 +2,9 @@
 
 ## Automatic compaction
 
+Available since v0.7.0. Install/update the same scope from the release archive and restart OpenCode
+before using the new commands. No existing goal migration or default opt-in is required.
+
 Use `/target context default 100k` for new sessions, or `/target context 70%` in the current session.
 `/target context status` and `/target doctor` include the last context measurement, chosen model,
 threshold, pending request, errors and recent events. Settings reside in `<state_dir>/context` and

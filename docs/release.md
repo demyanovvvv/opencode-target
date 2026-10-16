@@ -26,6 +26,8 @@ Confirm that:
 - source and generated plugin pass syntax checks;
 - the generated TUI plugin passes typecheck and OpenTUI renderer smoke coverage;
 - unit tests and all smoke suites pass, including budget-wrap-up and restart recovery coverage;
+- source/generated compaction integration, settings persistence, threshold/retry/duplicate fences,
+  native hook preservation and compaction/budget continuation gating pass;
 - `dist/target.js`, `dist/target-tui.js`, and the bundled installer helper contain the current
   source behavior;
 - installer scripts automatically register the TUI plugin without deleting existing TUI settings;
@@ -44,7 +46,9 @@ published user-facing documentation instead.
 ## Publish or distribute
 
 Releases are distributed through GitHub Releases. The package is private and is not published to npm.
-There is currently no release workflow in this checkout; use the verified local process below.
+The repository includes `.github/workflows/release.yml`, a manually dispatched workflow with a
+dry-run option. A local verified release is also supported by the process below. Use one publication
+path per version to avoid racing two publishers for the same tag.
 
 1. Confirm `package.json` is private and its version matches the version you intend to release.
 2. Add the matching `## [<version>]` section to `CHANGELOG.md`; the extraction script uses it as the
@@ -58,6 +62,17 @@ There is currently no release workflow in this checkout; use the verified local 
 7. Publish with `gh release create v<version> <release-dir>/opencode-target-<version>.tgz
    --verify-tag --title "v<version>" --notes-file <release-dir>/release-notes.md --latest`.
 8. Verify the published tag, release body, latest marker and attached archive before announcing it.
+
+For workflow publication, first commit and push the versioned source/docs/artifacts, then run:
+
+```text
+gh workflow run release.yml --ref main -f version=0.7.0 -f dry_run=true
+```
+
+Inspect the run with `gh run view` or `gh run watch`; dispatch again with `dry_run=false` to publish
+from the same verified commit. The workflow performs checks, packs the archive, extracts the
+matching changelog section and creates the release. After either publication path, check the
+release URL, latest tag, asset name/version and that the tag points to the intended commit.
 
 For local archive distribution:
 

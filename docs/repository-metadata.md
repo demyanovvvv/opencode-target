@@ -4,11 +4,11 @@
 
 Use this description for the GitHub repository About field and package metadata:
 
-> OpenCode plugin for persistent goals, automatic continuation, token budgets, and evidence-based completion checks.
+> OpenCode plugin for persistent goals, automatic continuation, context compaction, token budgets, and evidence-based completion checks.
 
 Russian equivalent:
 
-> Плагин OpenCode для сохранения целей, автоматического продолжения работы, бюджетов токенов и проверки завершения по доказательствам.
+> Плагин OpenCode для сохранения целей, автоматического продолжения, сжатия контекста, бюджетов токенов и проверки завершения по доказательствам.
 
 Completion checks describe the model's requirement/evidence audit and explicitly requested command
 gates, not a guarantee of task completion. Automatic continuation applies only while a Target is active.
@@ -25,6 +25,7 @@ goal
 target
 persistent-state
 automatic-continuation
+context-compaction
 token-budget
 token-accounting
 verification
@@ -33,7 +34,7 @@ tui
 
 The primary discovery topics are `opencode`, `opencode-plugin`, and `coding-agent`.
 `goal` and `target` identify the plugin's objective-oriented workflow and terminology.
-The remaining topics describe persistent state, automatic continuation, token budgets and accounting,
+The remaining topics describe persistent state, automatic continuation, context compaction, token budgets and accounting,
 completion verification, and the terminal indicator. `token-accounting` covers root/descendant usage,
 cached-input subtraction, and incremental accounting, beyond simply setting a budget.
 
