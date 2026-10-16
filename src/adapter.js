@@ -53,10 +53,50 @@ export function createGitAdapter({ exec = execFileAsync } = {}) {
   }
 }
 
-export function createOpenCodeAdapter(client, { timeoutMs = 30_000 } = {}) {
+export function createOpenCodeAdapter(client, { timeoutMs = 30_000, compactionTimeoutMs = 120_000 } = {}) {
   const pendingPrompts = new Set()
   const pendingMessages = new Map()
+  const pendingCompactions = new Set()
+  let models = null
+  let modelsAt = 0
   return {
+    async model(providerID, modelID) {
+      if (!providerID || !modelID || typeof client.provider?.list !== "function") return null
+      if (!models || Date.now() - modelsAt > 30000) {
+        const response = await withTimeout(() => client.provider.list(), timeoutMs, "providers", providerID)
+        if (response?.error || response?.response?.ok === false) throw new Error("OpenCode provider API failed")
+        models = unwrapData(response)?.all ?? []
+        modelsAt = Date.now()
+      }
+      return models.find((provider) => provider.id === providerID)?.models?.[modelID] ?? null
+    },
+    ...(typeof client.session?.summarize === "function" ? {
+      async summarize(sessionID, model) {
+        if (pendingCompactions.has(sessionID)) {
+          const error = new Error("A native compaction request is still unsettled")
+          error.code = "OPENCODE_COMPACTION_UNCERTAIN"
+          throw error
+        }
+        const controller = new AbortController()
+        pendingCompactions.add(sessionID)
+        try {
+          const response = await withTimeout(() => Promise.resolve().then(() => client.session.summarize({
+            path: { id: sessionID }, body: { ...model, auto: false }, signal: controller.signal,
+          })).finally(() => pendingCompactions.delete(sessionID)), compactionTimeoutMs, "summarize", sessionID, controller)
+          if (response?.error || response?.response?.ok === false || unwrapData(response) !== true) {
+            const error = new Error(`Native compaction request failed: ${JSON.stringify(response?.error ?? unwrapData(response))}`)
+            error.code = "OPENCODE_COMPACTION_FAILED"
+            throw error
+          }
+          return true
+        } catch (cause) {
+          if (cause?.code === "OPENCODE_COMPACTION_FAILED") throw cause
+          const error = new Error(`Native compaction result is uncertain: ${cause.message}`, { cause })
+          error.code = "OPENCODE_COMPACTION_UNCERTAIN"
+          throw error
+        }
+      },
+    } : {}),
     async messages(sessionID) {
       if (pendingMessages.has(sessionID)) return pendingMessages.get(sessionID)
       const operation = (async () => {

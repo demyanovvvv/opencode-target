@@ -28,6 +28,35 @@ function baseOperations(overrides = {}) {
   }
 }
 
+test("a pending compaction gates continuation before it is marked or dispatched", async () => {
+  let prompts = 0
+  const result = await runContinuationPhases({
+    scheduler: { resetRetries() {} }, host: {}, stateDir: "s", sessionID: "s",
+    target: { targetID: "t", status: "active" }, expectedTargetID: "t", leaseOwner: "owner",
+    operations: baseOperations({
+      checkContext: async (_id, options) => { assert.equal(options.leaseOwner, "owner"); return true },
+      sendPrompt: async () => { prompts += 1 },
+    }),
+  })
+  assert.equal(result.decision, "stop")
+  assert.equal(prompts, 0)
+})
+
+test("a pending compaction also gates budget wrap-up prompts", async () => {
+  let prompts = 0
+  const result = await runContinuationPhases({
+    scheduler: { resetRetries() {} }, host: {}, stateDir: "s", sessionID: "s",
+    target: { targetID: "t", status: "active" }, expectedTargetID: "t", leaseOwner: "owner",
+    operations: baseOperations({
+      accountLiveTarget: async () => ({ targetID: "t", status: "budget_limited", budgetWrapupSent: false }),
+      checkContext: async () => true,
+      sendPrompt: async () => { prompts += 1 },
+    }),
+  })
+  assert.equal(result.decision, "stop")
+  assert.equal(prompts, 0)
+})
+
 test("runContinuationPhases returns a typed stop decision after a completed turn", async () => {
   const calls = []
   const result = await runContinuationPhases({

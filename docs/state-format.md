@@ -29,6 +29,26 @@ another handle still has the destination open. `TargetStore` retries those codes
 exponential backoff, and uses the same retry for quarantine moves. Non-transient filesystem
 errors still fail immediately and are surfaced to the caller.
 
+## Context settings and request state
+
+Automatic `/compact` uses an independent version `1` document store in `<state_dir>/context`.
+It reuses `TargetStore` atomic writes, locks and corruption quarantine. Documents live under
+`context/targets/<base64url-key>.json`, with keys `defaults` and `session:<OpenCode-session-id>`.
+These are context records, not Target goals; the separate namespace prevents goal traversal or
+the TUI from treating them as lifecycle files. Clearing a goal leaves these settings intact.
+
+Each document has `version`, `sessionID` (the storage key), `settings: { enabled, threshold }`,
+and `runtime`. Threshold is null or `{ kind: "tokens" | "percent", value: positive integer }`;
+percent is limited to 1–99. Session records also have `source` and a monotonically increasing
+settings `revision`. Missing records start disabled and snapshot defaults on first use.
+
+Session `runtime` contains the last sample/model/window/threshold, summary ID, last completion/error,
+arming state, bounded retry state, and up to 50 diagnostic events. `pending` is null or a request
+with ID, expected `targetID`, start time, previous summary ID and settings revision. It is written
+before the API call and survives restart. An uncertain result preserves `pending` until a newer
+completed summary is observed. A settings command rearms the threshold but never erases that fence.
+Old Target schemas require no migration; context records are independent and initially absent.
+
 ## Schema
 
 The current persisted schema version is `3`. The implementation normalizes loaded state to the

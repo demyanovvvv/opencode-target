@@ -1049,6 +1049,7 @@ export async function recordTargetTurnOutcomes(stateDir, sessionID, messages, op
 
 async function applyTurnOutcome(stateDir, target, message, { automatic, failedExecThreshold, emptyAutomaticThreshold, execToolNames }, persist = true) {
     const info = message?.info ?? message
+    if (info?.summary || info?.mode === "compaction" || info?.agent === "compaction") return target
     const completedAt = Number(info?.time?.completed) || 0
     if (completedAt && completedAt < target.runtime.evaluatedThroughMs) return target
     const c = classifyAssistantTurn(message, { execToolNames })
@@ -1252,6 +1253,7 @@ export function parseTargetCommand(raw) {
 
   if (command === "status" || command === "view") return { op: "view" }
   if (command === "help") return { op: "help" }
+  if (command === "context") return { op: "context", arguments: tail }
   if (command === "doctor") return { op: "doctor" }
   if (command === "verify") return { op: "verify", verificationID: tail || null }
   if (command === "history") return { op: "history" }
@@ -1303,6 +1305,8 @@ export function targetHelp(commandName = "target", alias = "t") {
     `/${commandName} pause [reason]              Pause the Target`,
     `/${commandName} resume                      Resume a paused/blocked Target`,
     `/${commandName} budget <N|off>              Change budget (does not auto-resume)`,
+    `/${commandName} context [100k|70%|on|off|status|reset]  Configure automatic /compact`,
+    `/${commandName} context default [100k|70%|on|off|status]  Defaults for new sessions`,
     `/${commandName} doctor                      Diagnose state and OpenCode APIs`,
     `/${commandName} verify [gate-id]            Run configured verification gate(s)`,
     `/${commandName} history                     Show lifecycle event history`,

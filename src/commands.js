@@ -17,6 +17,7 @@ import {
   targetHelp,
   targetReport,
 } from "./core.js"
+import { ContextSettings, contextStatus, parseContextCommand } from "./context.js"
 
 function commandResultPrompt(action, target, continueNow = false, extraContext = "") {
   if (continueNow && target?.status === "active") {
@@ -50,10 +51,23 @@ export async function handleSlashCommand(host, $, workspaceDirectory, stateDir, 
     maxNoProgressTurns: options.max_no_progress_turns,
   }
 
+  if (parsed.op === "context") {
+    const command = parseContextCommand(parsed.arguments)
+    const settings = dependencies.contextSettings ?? new ContextSettings(stateDir)
+    const record = await settings.command(sessionID, command)
+    const target = await readTarget(stateDir, sessionID)
+    if (target?.status === "active") await deferNextContinuation(stateDir, sessionID, 1, target.targetID)
+    const text = command.scope === "session" && dependencies.contextStatus
+      ? await dependencies.contextStatus(sessionID)
+      : contextStatus(record, { scope: command.scope, active: target?.status === "active" })
+    return commandResultPrompt(text, target, false)
+  }
+
   if (parsed.op === "view") {
     const target = await readTarget(stateDir, sessionID)
     if (target?.status === "active") await deferNextContinuation(stateDir, sessionID, 1, target.targetID)
-    return commandResultPrompt(`Target control — current state:\n${conciseStatus(target)}`, target, false)
+    const context = dependencies.contextStatus ? `\n\n${await dependencies.contextStatus(sessionID)}` : ""
+    return commandResultPrompt(`Target control — current state:\n${conciseStatus(target)}${context}`, target, false)
   }
 
   if (parsed.op === "help") {
@@ -63,7 +77,8 @@ export async function handleSlashCommand(host, $, workspaceDirectory, stateDir, 
   }
 
   if (parsed.op === "doctor") {
-    return commandResultPrompt(await targetDiagnostics(client, stateDir, sessionID), null, false)
+    const context = dependencies.contextStatus ? `\n\n${await dependencies.contextStatus(sessionID)}` : ""
+    return commandResultPrompt(`${await targetDiagnostics(client, stateDir, sessionID)}${context}`, null, false)
   }
 
   if (parsed.op === "history" || parsed.op === "explain" || parsed.op === "report") {
@@ -110,6 +125,7 @@ export async function handleSlashCommand(host, $, workspaceDirectory, stateDir, 
       maxDepth: Math.max(0, Number(options?.descendant_max_depth ?? 6)),
       maxSessions: Math.max(1, Number(options?.descendant_max_sessions ?? 96)),
     })
+    await (dependencies.contextSettings ?? new ContextSettings(stateDir)).session(sessionID)
     const target = await createTarget(stateDir, sessionID, parsed.objective, parsed.tokenBudget, {
       ...createOptions,
       baselineSamples,

@@ -130,6 +130,30 @@ system transform, preserve Target state across compaction, and disable generic c
 autocontinuation while an active Target owns the loop. These helpers only mutate OpenCode hook
 outputs; persisted Target state remains owned by the core functions they call for reads.
 
+### Threshold-driven native compaction
+
+`src/context.js` owns independently versioned default/session settings, threshold parsing and
+context measurement. Settings use `TargetStore` beneath `<state_dir>/context`, separate from goal
+files, so clearing/replacing a goal retains the dialogue's preference. New sessions snapshot defaults.
+The context statistic follows OpenCode 1.18.30: `tokens.total`, or input + output + cache read/write.
+Only the latest chronological completed working step after the latest successful summary is used.
+Percent thresholds use the selected user model's window, with the response model as a fallback.
+
+`src/context-compaction.js` reacts to completed messages, compaction and idle boundaries. It claims
+the scheduler lease (or reuses the current continuation lease), rechecks active identity/settings,
+accounts root usage and persists one request before dispatching native `session.summarize` with
+`auto: false`. The endpoint may queue compaction in a running host loop. The event hook never waits
+for the completed summary. A pending request gates continuation; only the normal Target scheduler
+dispatches the subsequent work turn, respecting `auto_continue` and input boundaries.
+
+The durable request ID and settings revision fence duplicate events, processes and stale callbacks.
+The compaction hook observes manual/native requests too. Completed summaries reconcile pending
+requests after restart. An uncertain request retains its fence and pauses its expected Target;
+explicit host failures retry at most three times. A two-minute result timeout is used independently
+of short host read timeouts. The next fresh measurement rearms only below the threshold, preventing
+immediate loops when the retained context is already too large. Summary tokens remain billable,
+but summaries do not consume pending automatic-work classification or progress streaks.
+
 Slash commands are coordinated by `src/commands.js`. The module owns command-to-operation
 dispatch, while receiving host and runtime operations as explicit dependencies. `server.js` keeps
 the OpenCode command hook and error-to-output adaptation; core state transitions, stale-target

@@ -12,6 +12,8 @@ import { handleSessionError } from "./error-lifecycle.js"
 import { accountToolBoundary } from "./tool-accounting.js"
 import { applyCompactionContext, applySystemPolicy, disableCompactionAutocontinue } from "./context-hooks.js"
 import { handleSlashCommand } from "./commands.js"
+import { ContextSettings } from "./context.js"
+import { ContextCompactor } from "./context-compaction.js"
 import { collectSessionUsage } from "./traversal.js"
 import {
   accountTargetUsage,
@@ -19,6 +21,7 @@ import {
   addTargetEvidence,
   acquireSchedulerLease,
   budgetLimitPrompt,
+  compactionTargetContext,
   continuationPrompt,
   createTarget,
   defaultStateDir,
@@ -35,6 +38,7 @@ import {
   renewSchedulerLease,
   setStoppedStatus,
   snapshotTarget,
+  systemTargetPolicy,
   consumeContinuationDeferral,
 } from "./core.js"
 
@@ -202,6 +206,7 @@ async function processIdle(scheduler, host, stateDir, sessionID, options) {
           markBudgetWrapupSent,
           consumeContinuationDeferral,
           markContinuationStarted,
+          checkContext: (id, settings) => host.context.check(id, settings),
         },
       })
       accountingPhase = phaseContext.value
@@ -306,13 +311,29 @@ export const TargetPlugin = async ({ client, $, directory }, rawOptions = {}) =>
   if (await shadowedByLocalInstall(import.meta.url, directory)) return {}
   const options = normalizePluginOptions({ ...rawOptions, worktree: rawOptions.worktree ?? directory ?? process.cwd() })
   const adapter = createOpenCodeAdapter(client, { timeoutMs: options.host_api_timeout_ms })
-  const host = { adapter, client, pendingInput: new Map(), usageUpdates: new Map() }
+  const host = { adapter, client, pendingInput: new Map(), usageUpdates: new Map(), sessionStatus: new Map() }
   const scheduler = new SchedulerState()
   const stateDir = options.state_dir ? String(options.state_dir) : await installedStateDir(import.meta.url) || defaultStateDir()
   const commandName = String(options.command_name || "target")
   const aliasName = options.alias === false ? null : String(options.alias || "t")
   const autoContinue = options.auto_continue !== false
   const maxBudget = options.max_target_token_budget ?? null
+  const contextSettings = new ContextSettings(stateDir)
+  const context = new ContextCompactor({
+    stateDir, settings: contextSettings, adapter,
+    pendingInput: (sessionID) => Boolean(host.pendingInput.get(sessionID)?.size),
+    log: (level, message, extra) => { void log(client, level, message, extra) },
+    onReady: (sessionID) => {
+      if (autoContinue && !host.pendingInput.get(sessionID)?.size) scheduler.scheduleRecheck(sessionID, 50, () => {
+        void (async () => {
+          const status = typeof client.session.status === "function" ? await adapter.status(sessionID) : host.sessionStatus.get(sessionID)
+          if (status === "busy" || status === "retry") { context.wake(sessionID, 250); return }
+          await processIdle(scheduler, host, stateDir, sessionID, options)
+        })().catch((error) => log(client, "warn", "Post-compaction continuation check failed", { sessionID, error: error.message }))
+      })
+    },
+  })
+  host.context = context
 
   await log(client, "info", "OpenCode Target initialized", {
     stateDir,
@@ -323,7 +344,7 @@ export const TargetPlugin = async ({ client, $, directory }, rawOptions = {}) =>
   })
 
   return {
-    whenIdle: (sessionID) => scheduler.whenIdle(String(sessionID)),
+    whenIdle: async (sessionID) => { await context.settled(String(sessionID)); await scheduler.whenIdle(String(sessionID)) },
 
     config: async (config) => {
       config.command ??= {}
@@ -373,6 +394,7 @@ export const TargetPlugin = async ({ client, $, directory }, rawOptions = {}) =>
           })).optional().describe("Optional acceptance requirements that must have evidence before completion."),
         },
         async execute(args, context) {
+          await contextSettings.session(context.sessionID)
           const baselineSamples = await collectSessionUsage(host.adapter || host, context.sessionID, {
             maxDepth: Math.max(0, Number(options?.descendant_max_depth ?? 6)),
             maxSessions: Math.max(1, Number(options?.descendant_max_sessions ?? 96)),
@@ -497,6 +519,8 @@ export const TargetPlugin = async ({ client, $, directory }, rawOptions = {}) =>
           getWorktreeFingerprint,
           targetDiagnostics,
           executeVerificationGate: executeVerificationGateFor,
+          contextSettings,
+          contextStatus: (sessionID) => context.status(sessionID),
         })
         // OpenCode keeps the original parts array; mutate it in place.
         output.parts.splice(0, output.parts.length, { type: "text", text: prompt, synthetic: true })
@@ -514,6 +538,7 @@ export const TargetPlugin = async ({ client, $, directory }, rawOptions = {}) =>
     },
 
     "experimental.session.compacting": async (input, output) => {
+      await context.compacting(input.sessionID)
       return applyCompactionContext({ input, output, stateDir, readTarget, compactionTargetContext })
     },
 
@@ -528,8 +553,20 @@ export const TargetPlugin = async ({ client, $, directory }, rawOptions = {}) =>
           const updates = host.usageUpdates.get(info.sessionID) || new Map()
           updates.set(info.id, { info })
           host.usageUpdates.set(info.sessionID, updates)
+          if (info.time?.completed) void context.check(info.sessionID).catch((error) => log(client, "warn", "Target context check failed", { sessionID: info.sessionID, error: error.message }))
         }
         return
+      }
+      if (event.type === "session.status") {
+        host.sessionStatus.set(event.properties.sessionID, event.properties.status?.type)
+      }
+      if (event.type === "session.compacted") {
+        void context.check(event.properties.sessionID).catch((error) => log(client, "warn", "Target compaction reconciliation failed", { error: error.message }))
+        return
+      }
+      if (event.type === "session.idle") {
+        host.sessionStatus.set(event.properties.sessionID, "idle")
+        if (!autoContinue) void context.check(event.properties.sessionID).catch((error) => log(client, "warn", "Target context check failed", { error: error.message }))
       }
       if (["permission.asked", "permission.replied", "question.asked", "question.replied", "question.rejected"].includes(event.type)) {
         const properties = event.properties || {}
@@ -546,6 +583,8 @@ export const TargetPlugin = async ({ client, $, directory }, rawOptions = {}) =>
       }
       const route = resolveEventAction(event, autoContinue)
       if (route.action === "dispose") {
+        context.dispose()
+        host.sessionStatus.clear()
         host.pendingInput.clear()
         host.usageUpdates.clear()
         scheduler.dispose()
@@ -555,6 +594,8 @@ export const TargetPlugin = async ({ client, $, directory }, rawOptions = {}) =>
       const { sessionID } = route
 
       if (route.action === "dispose-session") {
+        context.disposeSession(sessionID)
+        host.sessionStatus.delete(sessionID)
         host.pendingInput.delete(sessionID)
         host.usageUpdates.delete(sessionID)
         scheduler.disposeSession(sessionID)

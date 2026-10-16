@@ -30,6 +30,7 @@ export async function runContinuationPhases({
     markBudgetWrapupSent,
     consumeContinuationDeferral,
     markContinuationStarted,
+    checkContext,
   } = operations
   phaseContext.value = "pre"
   const defaultDelay = Math.max(50, Number(options.min_continue_interval_ms ?? 250))
@@ -73,6 +74,10 @@ export async function runContinuationPhases({
   target = (await accountLiveTarget(host, stateDir, sessionID, expectedTargetID, options, rootMessages)) || target
   if (!sameTarget(target, expectedTargetID)) return result(target, phaseContext.value, "stop", recheckDelay)
   scheduler.resetRetries(sessionID, "pre")
+
+  if (checkContext && await checkContext(sessionID, { leaseOwner })) {
+    return result(target, phaseContext.value, "stop", recheckDelay)
+  }
 
   if (target.status === "budget_limited") {
     if (!target.budgetWrapupSent) {

@@ -5,6 +5,7 @@ import os from "node:os"
 import path from "node:path"
 import { handleSlashCommand } from "../src/commands.js"
 import { readTarget } from "../src/core.js"
+import { ContextSettings } from "../src/context.js"
 
 async function withState(run) {
   const stateDir = await mkdtemp(path.join(os.tmpdir(), "target-commands-test-"))
@@ -23,6 +24,18 @@ function dependencies() {
     executeVerificationGate: async () => { throw new Error("unused") },
   }
 }
+
+test("context commands work before a Target exists, persist defaults and reject invalid arguments", async () => {
+  await withState(async (stateDir) => {
+    const run = (text) => handleSlashCommand({}, null, process.cwd(), stateDir, "context", text, {}, dependencies())
+    assert.match(await run("context default 100k"), /100,000/)
+    assert.equal(await readTarget(stateDir, "context"), null)
+    assert.match(await run("context 70%"), /70%/)
+    assert.equal((await new ContextSettings(stateDir).session("context")).settings.threshold.value, 70)
+    await assert.rejects(run("context 100%"), /threshold/)
+    assert.match(await run("help"), /context/)
+  })
+})
 
 test("slash command handler creates and views a Target through explicit dependencies", async () => {
   await withState(async (stateDir) => {

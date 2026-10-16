@@ -1,5 +1,20 @@
 # Operations Runbook
 
+## Automatic compaction
+
+Use `/target context default 100k` for new sessions, or `/target context 70%` in the current session.
+`/target context status` and `/target doctor` include the last context measurement, chosen model,
+threshold, pending request, errors and recent events. Settings reside in `<state_dir>/context` and
+survive `/target clear`; `context reset` copies the current defaults. `context off` preserves the
+threshold and does not disable the host's own overflow compaction.
+
+If the retained context is above the threshold immediately after a summary, increase the threshold.
+If compaction fails three times, inspect the host error and resume explicitly once corrected.
+If a request timed out or its result is unknown, the Target pauses and the durable request fence
+remains: allow the host operation to settle or run manual `/compact`, then resume. A newer completed
+summary clears the fence; settings toggles do not discard an operation whose outcome is unknown.
+The controller checks the history on resumed activity rather than blindly submitting a duplicate.
+
 ## Confirm installation
 
 Run `sh install.sh` or `powershell -ExecutionPolicy Bypass -File .\install.ps1` from the archive.

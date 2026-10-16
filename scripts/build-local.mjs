@@ -24,6 +24,8 @@ let toolAccounting = await readFile(path.join(root, "src/tool-accounting.js"), "
 let verificationGate = await readFile(path.join(root, "src/verification-gate.js"), "utf8")
 let contextHooks = await readFile(path.join(root, "src/context-hooks.js"), "utf8")
 let commands = await readFile(path.join(root, "src/commands.js"), "utf8")
+let contextSettingsSource = await readFile(path.join(root, "src/context.js"), "utf8")
+let contextCompactionSource = await readFile(path.join(root, "src/context-compaction.js"), "utf8")
 
 const internalize = (source) => source
   .replace(/^import \{\r?\n[\s\S]*?^\} from "[^"]+"\r?\n/gm, "")
@@ -48,12 +50,14 @@ toolAccounting = internalize(toolAccounting)
 verificationGate = internalize(verificationGate)
 contextHooks = internalize(contextHooks)
 commands = internalize(commands)
+contextSettingsSource = internalize(contextSettingsSource)
+contextCompactionSource = internalize(contextCompactionSource)
 core = internalize(core)
 server = internalize(server)
 server = server.replace("const TargetPlugin =", "export const TargetPlugin =")
 
 const banner = `// OpenCode Target — self-contained local plugin
-// Generated from src/store.js + src/ledger.js + src/adapter.js + src/scheduler.js + src/traversal.js + src/repository.js + src/verification.js + src/continuation.js + src/options.js + src/host.js + src/errors.js + src/event-routing.js + src/error-lifecycle.js + src/tool-accounting.js + src/context-hooks.js + src/commands.js + src/core.js + src/verification-gate.js + src/server.js. Do not edit dist directly.
+// Generated from src/ modules, including context.js and context-compaction.js. Do not edit dist directly.
 import { tool } from "@opencode-ai/plugin"
 import { randomUUID } from "node:crypto"
 import { execFile } from "node:child_process"
@@ -63,7 +67,7 @@ import path from "node:path"
 import { promisify } from "node:util"
 import { fileURLToPath } from "node:url"
 `
-const output = `${banner}${store.trim()}\n\n${ledger.trim()}\n\n${adapter.trim()}\n\n${scheduler.trim()}\n\n${traversal.trim()}\n\n${repository.trim()}\n\n${verification.trim()}\n\n${continuation.trim()}\n\n${options.trim()}\n\n${host.trim()}\n\n${errors.trim()}\n\n${eventRouting.trim()}\n\n${errorLifecycle.trim()}\n\n${toolAccounting.trim()}\n\n${contextHooks.trim()}\n\n${commands.trim()}\n\n${core.trim()}\n\n${verificationGate.trim()}\n\n${server.trim()}\n`
+const output = `${banner}${store.trim()}\n\n${ledger.trim()}\n\n${adapter.trim()}\n\n${scheduler.trim()}\n\n${traversal.trim()}\n\n${repository.trim()}\n\n${verification.trim()}\n\n${continuation.trim()}\n\n${options.trim()}\n\n${host.trim()}\n\n${errors.trim()}\n\n${eventRouting.trim()}\n\n${errorLifecycle.trim()}\n\n${toolAccounting.trim()}\n\n${contextHooks.trim()}\n\n${contextSettingsSource.trim()}\n\n${contextCompactionSource.trim()}\n\n${commands.trim()}\n\n${core.trim()}\n\n${verificationGate.trim()}\n\n${server.trim()}\n`
 await mkdir(path.join(root, "dist"), { recursive: true })
 await writeFile(path.join(root, "dist/target.js"), output + "\n" + installState)
 console.log("built dist/target.js")

@@ -1,5 +1,5 @@
 // OpenCode Target — self-contained local plugin
-// Generated from src/store.js + src/ledger.js + src/adapter.js + src/scheduler.js + src/traversal.js + src/repository.js + src/verification.js + src/continuation.js + src/options.js + src/host.js + src/errors.js + src/event-routing.js + src/error-lifecycle.js + src/tool-accounting.js + src/context-hooks.js + src/commands.js + src/core.js + src/verification-gate.js + src/server.js. Do not edit dist directly.
+// Generated from src/ modules, including context.js and context-compaction.js. Do not edit dist directly.
 import { tool } from "@opencode-ai/plugin"
 import { randomUUID } from "node:crypto"
 import { execFile } from "node:child_process"
@@ -248,10 +248,50 @@ function createGitAdapter({ exec = execFileAsync } = {}) {
   }
 }
 
-function createOpenCodeAdapter(client, { timeoutMs = 30_000 } = {}) {
+function createOpenCodeAdapter(client, { timeoutMs = 30_000, compactionTimeoutMs = 120_000 } = {}) {
   const pendingPrompts = new Set()
   const pendingMessages = new Map()
+  const pendingCompactions = new Set()
+  let models = null
+  let modelsAt = 0
   return {
+    async model(providerID, modelID) {
+      if (!providerID || !modelID || typeof client.provider?.list !== "function") return null
+      if (!models || Date.now() - modelsAt > 30000) {
+        const response = await withTimeout(() => client.provider.list(), timeoutMs, "providers", providerID)
+        if (response?.error || response?.response?.ok === false) throw new Error("OpenCode provider API failed")
+        models = unwrapData(response)?.all ?? []
+        modelsAt = Date.now()
+      }
+      return models.find((provider) => provider.id === providerID)?.models?.[modelID] ?? null
+    },
+    ...(typeof client.session?.summarize === "function" ? {
+      async summarize(sessionID, model) {
+        if (pendingCompactions.has(sessionID)) {
+          const error = new Error("A native compaction request is still unsettled")
+          error.code = "OPENCODE_COMPACTION_UNCERTAIN"
+          throw error
+        }
+        const controller = new AbortController()
+        pendingCompactions.add(sessionID)
+        try {
+          const response = await withTimeout(() => Promise.resolve().then(() => client.session.summarize({
+            path: { id: sessionID }, body: { ...model, auto: false }, signal: controller.signal,
+          })).finally(() => pendingCompactions.delete(sessionID)), compactionTimeoutMs, "summarize", sessionID, controller)
+          if (response?.error || response?.response?.ok === false || unwrapData(response) !== true) {
+            const error = new Error(`Native compaction request failed: ${JSON.stringify(response?.error ?? unwrapData(response))}`)
+            error.code = "OPENCODE_COMPACTION_FAILED"
+            throw error
+          }
+          return true
+        } catch (cause) {
+          if (cause?.code === "OPENCODE_COMPACTION_FAILED") throw cause
+          const error = new Error(`Native compaction result is uncertain: ${cause.message}`, { cause })
+          error.code = "OPENCODE_COMPACTION_UNCERTAIN"
+          throw error
+        }
+      },
+    } : {}),
     async messages(sessionID) {
       if (pendingMessages.has(sessionID)) return pendingMessages.get(sessionID)
       const operation = (async () => {
@@ -647,6 +687,7 @@ async function runContinuationPhases({
     markBudgetWrapupSent,
     consumeContinuationDeferral,
     markContinuationStarted,
+    checkContext,
   } = operations
   phaseContext.value = "pre"
   const defaultDelay = Math.max(50, Number(options.min_continue_interval_ms ?? 250))
@@ -690,6 +731,10 @@ async function runContinuationPhases({
   target = (await accountLiveTarget(host, stateDir, sessionID, expectedTargetID, options, rootMessages)) || target
   if (!sameTarget(target, expectedTargetID)) return result(target, phaseContext.value, "stop", recheckDelay)
   scheduler.resetRetries(sessionID, "pre")
+
+  if (checkContext && await checkContext(sessionID, { leaseOwner })) {
+    return result(target, phaseContext.value, "stop", recheckDelay)
+  }
 
   if (target.status === "budget_limited") {
     if (!target.budgetWrapupSent) {
@@ -968,6 +1013,331 @@ async function disableCompactionAutocontinue({ input, output, stateDir, readTarg
   if (target?.status === "active") output.enabled = false
 }
 
+// Context settings are independent of the Target lifecycle and survive clearing a goal.
+// A dedicated store provides atomic writes, cross-process locks and corruption quarantine.
+
+const CONTEXT_VERSION = 1
+const CONTEXT_DEFAULTS_KEY = "defaults"
+const CONTEXT_INITIAL = { enabled: false, threshold: null }
+
+function recordContextEvent(record, type, details = {}) {
+  record.runtime.events = [...(record.runtime.events ?? []), { type, atMs: Date.now(), details }].slice(-50)
+}
+
+function parseContextThreshold(raw) {
+  const text = String(raw).trim()
+  if (/^(?:[1-9]|[1-9]\d)%$/.test(text)) return { kind: "percent", value: Number(text.slice(0, -1)) }
+  const match = text.match(/^(\d+(?:_\d+)*(?:\.\d+)?)([km])?$/i)
+  const value = match ? Number(match[1].replaceAll("_", "")) * ({ k: 1000, m: 1000000 }[match[2]?.toLowerCase()] ?? 1) : NaN
+  if (!Number.isSafeInteger(value) || value < 1) throw new Error("Context threshold must be positive whole tokens (100k, 1m) or 1%–99%.")
+  return { kind: "tokens", value }
+}
+
+function parseContextCommand(raw = "") {
+  const words = String(raw).trim().split(/\s+/).filter(Boolean)
+  const scope = words[0]?.toLowerCase() === "default" ? (words.shift(), "default") : "session"
+  const arg = words[0]?.toLowerCase() || "status"
+  if (words.length > 1 || (arg === "reset" && scope === "default")) throw new Error("Usage: /target context [default] [100k|70%|on|off|status] or /target context reset")
+  if (["status", "on", "off", "reset"].includes(arg)) return { scope, action: arg }
+  return { scope, action: "set", threshold: parseContextThreshold(arg) }
+}
+
+function validateContextSettings(value) {
+  if (!value || typeof value.enabled !== "boolean") throw new Error("Invalid context settings")
+  const threshold = value.threshold
+  if (threshold !== null && (!threshold || !["tokens", "percent"].includes(threshold.kind) || !Number.isSafeInteger(threshold.value) || threshold.value < 1 || (threshold.kind === "percent" && threshold.value > 99))) throw new Error("Invalid context threshold")
+  if (value.enabled && !threshold) throw new Error("Enabled context settings require a threshold")
+  return { enabled: value.enabled, threshold: threshold ? { kind: threshold.kind, value: threshold.value } : null }
+}
+
+class ContextSettings {
+  constructor(stateDir) { this.store = new TargetStore(path.join(stateDir, "context")) }
+
+  async read(key) {
+    const value = await this.store.read(key)
+    if (value === null) return null
+    try {
+      if (value.version !== CONTEXT_VERSION || value.sessionID !== key || !value.runtime || typeof value.runtime !== "object" || Array.isArray(value.runtime)) throw new Error("Invalid context state")
+      const pending = value.runtime.pending
+      if (pending !== undefined && pending !== null && (typeof pending.id !== "string" || !pending.id || typeof pending.targetID !== "string" || !pending.targetID || !Number.isFinite(pending.startedAtMs) || pending.startedAtMs <= 0 || !Number.isSafeInteger(pending.revision) || pending.revision < 0)) throw new Error("Invalid pending compaction request")
+      if (value.revision !== undefined && (!Number.isSafeInteger(value.revision) || value.revision < 0)) throw new Error("Invalid context settings revision")
+      if (value.runtime.events !== undefined && !Array.isArray(value.runtime.events)) throw new Error("Invalid context events")
+      return { ...value, settings: validateContextSettings(value.settings) }
+    } catch (cause) {
+      const file = await this.store.quarantine(key)
+      const error = new Error(`Context state is corrupt and was quarantined: ${file}`, { cause })
+      error.code = "TARGET_CONTEXT_CORRUPT"
+      throw error
+    }
+  }
+
+  async defaults() { return (await this.read(CONTEXT_DEFAULTS_KEY))?.settings ?? { ...CONTEXT_INITIAL } }
+
+  async mutate(sessionID, operation) {
+    const key = `session:${sessionID}`
+    return this.store.withLock(key, async () => {
+      const current = await this.read(key) ?? { version: CONTEXT_VERSION, sessionID: key, settings: await this.defaults(), runtime: {}, source: "default", revision: 0 }
+      const next = await operation(current)
+      if (next === null) return null
+      await this.store.write(key, next)
+      return next
+    })
+  }
+
+  session(sessionID) { return this.mutate(sessionID, (current) => current) }
+
+  async command(sessionID, parsed) {
+    if (parsed.scope === "default") {
+      return this.store.withLock(CONTEXT_DEFAULTS_KEY, async () => {
+        const current = await this.read(CONTEXT_DEFAULTS_KEY) ?? { version: CONTEXT_VERSION, sessionID: CONTEXT_DEFAULTS_KEY, settings: { ...CONTEXT_INITIAL }, runtime: {} }
+        current.settings = this.apply(current.settings, parsed)
+        if (parsed.action !== "status") recordContextEvent(current, "settings.changed", { scope: "default", action: parsed.action, ...current.settings })
+        await this.store.write(CONTEXT_DEFAULTS_KEY, current)
+        return current
+      })
+    }
+    return this.mutate(sessionID, async (current) => {
+      if (parsed.action === "status") return current
+      current.settings = parsed.action === "reset" ? await this.defaults() : this.apply(current.settings, parsed)
+      current.source = parsed.action === "reset" ? "default" : "session"
+      current.revision = (current.revision || 0) + 1
+      current.runtime = { ...current.runtime, armed: true, awaitingFresh: false, reason: null, failureAttempts: 0, nextRetryAtMs: null }
+      recordContextEvent(current, "settings.changed", { scope: "session", action: parsed.action, ...current.settings })
+      return current
+    })
+  }
+
+  apply(settings, parsed) {
+    if (parsed.action === "set") return validateContextSettings({ enabled: true, threshold: parsed.threshold })
+    if (parsed.action === "on" && !settings.threshold) throw new Error("Set a context threshold first, for example: /target context 100k")
+    return validateContextSettings({ ...settings, enabled: parsed.action === "on" ? true : parsed.action === "off" ? false : settings.enabled })
+  }
+}
+
+function contextMessageAfter(info, other) {
+  return !other || (Number(info.time?.created) || 0) > (Number(other.time?.created) || 0) || ((Number(info.time?.created) || 0) === (Number(other.time?.created) || 0) && String(info.id) > String(other.id))
+}
+
+function contextMeasurement(messages = []) {
+  let latest = null
+  let summary = null
+  let user = null
+  for (const message of messages) {
+    const info = message.info ?? message
+    if (info.role === "user" && contextMessageAfter(info, user)) user = info
+    if (info.role !== "assistant" || !info.time?.completed || info.error) continue
+    if ((info.summary || info.mode === "compaction" || info.agent === "compaction") && contextMessageAfter(info, summary)) summary = info
+    if (!(info.summary || info.mode === "compaction" || info.agent === "compaction") && contextMessageAfter(info, latest)) latest = info
+  }
+  let sample = null
+  if (latest && (!summary || contextMessageAfter(latest, summary))) {
+    const usage = latest.tokens ?? {}
+    const finite = (n) => Number.isFinite(n) && n >= 0 ? n : 0
+    const tokens = finite(usage.total) || finite(usage.input) + finite(usage.output) + finite(usage.cache?.read) + finite(usage.cache?.write)
+    if (tokens > 0) sample = { id: latest.id, tokens, createdAtMs: latest.time.created, completedAtMs: latest.time.completed, providerID: latest.providerID, modelID: latest.modelID }
+  }
+  return { sample, summary: summary ? { id: summary.id, createdAtMs: summary.time.created, completedAtMs: summary.time.completed } : null, user }
+}
+
+function contextThresholdTokens(threshold, model) {
+  if (!threshold) return null
+  if (threshold.kind === "tokens") return threshold.value
+  const context = Number(model?.limit?.context)
+  return Number.isFinite(context) && context > 0 ? Math.floor(context * threshold.value / 100) : null
+}
+
+function contextStatus(record, { scope = "session", active = false, supported = true } = {}) {
+  const { settings, runtime = {} } = record
+  const threshold = settings.threshold ? `${settings.threshold.value.toLocaleString("en-US")}${settings.threshold.kind === "percent" ? "%" : " tokens"}` : "not set"
+  return [
+    "Target context — automatic native /compact",
+    `Enabled: ${settings.enabled}; scope: ${scope}; source: ${record.source || scope}`,
+    `Threshold: ${threshold}`,
+    runtime.modelContext ? `Model window: ${runtime.modelContext.toLocaleString("en-US")} tokens (${runtime.providerID}/${runtime.modelID})` : null,
+    runtime.thresholdTokens ? `Trigger: ${runtime.thresholdTokens.toLocaleString("en-US")} tokens` : null,
+    runtime.sample ? `Last context: ${runtime.sample.tokens.toLocaleString("en-US")} tokens${runtime.modelContext ? ` (${(runtime.sample.tokens * 100 / runtime.modelContext).toFixed(1)}%)` : ""}; measured ${new Date(runtime.sample.completedAtMs).toISOString()}` : "Last context: no fresh measurement",
+    `Compaction: ${!supported ? "unavailable (session.summarize API missing)" : runtime.pending ? "pending" : runtime.reason || (active ? "waiting for threshold" : "waiting for an active Target")}`,
+    runtime.lastCompletedAtMs ? `Last successful compaction: ${new Date(runtime.lastCompletedAtMs).toISOString()}` : null,
+    runtime.lastError ? `Last error: ${runtime.lastError}` : null,
+    runtime.events?.length ? `Recent events:\n${runtime.events.slice(-5).map((event) => `- ${new Date(event.atMs).toISOString()} ${event.type}`).join("\n")}` : null,
+  ].filter(Boolean).join("\n")
+}
+
+// Coordinates native compaction without owning the assistant's continuation loop.
+// Durable request identities fence duplicate events, replacement Targets and restarts.
+
+class ContextCompactor {
+  constructor({ stateDir, settings, adapter, timeoutMs = 120000, pendingInput = () => false, onReady = () => {}, log = () => {} }) {
+    Object.assign(this, { stateDir, settings, adapter, timeoutMs, pendingInput, onReady, log })
+    this.checks = new Map()
+    this.requests = new Map()
+    this.timers = new Map()
+    this.disposed = false
+  }
+
+  check(sessionID, options = {}) {
+    if (this.disposed) return Promise.resolve(false)
+    if (this.checks.has(sessionID)) return this.checks.get(sessionID)
+    const operation = this.evaluate(sessionID, options).finally(() => this.checks.delete(sessionID))
+    this.checks.set(sessionID, operation)
+    return operation
+  }
+
+  async evaluate(sessionID, { leaseOwner = null } = {}) {
+    const target = await readTarget(this.stateDir, sessionID)
+    if (!target) return false
+    let record = await this.settings.session(sessionID)
+    if (!record.settings.enabled && !record.runtime.pending) return this.requests.has(sessionID)
+    const messages = await this.adapter.messages(sessionID)
+    const measurement = contextMeasurement(messages)
+    const { sample, summary } = measurement
+    const pending = record.runtime.pending
+    if (pending) {
+      if (summary && summary.id !== pending.summaryID && summary.createdAtMs >= pending.startedAtMs) {
+        await this.completed(sessionID, pending.id, summary)
+        record = await this.settings.session(sessionID)
+      } else {
+        if (!this.requests.has(sessionID) && Date.now() - pending.startedAtMs >= this.timeoutMs) {
+          await this.fail(sessionID, pending, new Error("Compaction result could not be confirmed after restart or timeout"), true)
+          return true
+        }
+        this.wake(sessionID, Math.max(50, this.timeoutMs - (Date.now() - pending.startedAtMs)))
+        return true
+      }
+    }
+    if (summary && summary.id !== record.runtime.summaryID) {
+      record = await this.settings.mutate(sessionID, (current) => {
+        current.runtime = { ...current.runtime, summaryID: summary.id, lastCompletedAtMs: summary.completedAtMs, awaitingFresh: true, armed: false, sample: null, reason: "waiting for fresh context after compaction" }
+        return current
+      })
+    }
+    if (this.requests.has(sessionID)) return true
+    if (target.status !== "active") return false
+    if (!record.settings.enabled) return false
+    if (!sample) return false
+    const revision = record.revision
+    const modelIdentity = measurement.user?.model ?? { providerID: sample.providerID, modelID: sample.modelID }
+    let model = null
+    try { model = await this.adapter.model?.(modelIdentity.providerID, modelIdentity.modelID) } catch (error) { this.log("warn", "Context model lookup failed", { error: error.message }) }
+    const thresholdTokens = contextThresholdTokens(record.settings.threshold, model)
+    record = await this.settings.mutate(sessionID, (current) => {
+      if (current.revision !== revision || current.runtime.pending) return current
+      const runtime = current.runtime
+      Object.assign(runtime, { sample, modelContext: Number(model?.limit?.context) || null, thresholdTokens, ...modelIdentity })
+      if (thresholdTokens === null) runtime.reason = "model context window is unavailable"
+      else if (sample.tokens < thresholdTokens) Object.assign(runtime, { armed: true, awaitingFresh: false, reason: null, failureAttempts: 0, nextRetryAtMs: null })
+      else if (runtime.awaitingFresh) Object.assign(runtime, { armed: false, awaitingFresh: false, reason: "Context threshold is below the context size after compaction; increase the threshold." })
+      return current
+    })
+    if (record.revision !== revision) { this.wake(sessionID, 50); return true }
+    if (!record.settings.enabled || record.runtime.pending || !thresholdTokens || sample.tokens < thresholdTokens || record.runtime.armed === false || this.pendingInput(sessionID)) return Boolean(record.runtime.pending)
+    if (record.runtime.nextRetryAtMs > Date.now()) {
+      this.wake(sessionID, record.runtime.nextRetryAtMs - Date.now())
+      return true
+    }
+    if (typeof this.adapter.summarize !== "function" || !modelIdentity.providerID || !modelIdentity.modelID) {
+      await this.settings.mutate(sessionID, (current) => { current.runtime.reason = "native compaction API or model identity unavailable"; return current })
+      return false
+    }
+    const accounted = await accountTargetUsage(this.stateDir, sessionID, messages.map((message) => ({ sessionID, message })), { expectedTargetID: target.targetID })
+    if (!accounted || accounted.status !== "active") return false
+
+    const owner = leaseOwner ?? newSchedulerOwnerID()
+    const lease = leaseOwner ? { acquired: true } : await acquireSchedulerLease(this.stateDir, sessionID, owner, { expectedTargetID: target.targetID, leaseMs: 30000 })
+    if (!lease?.acquired) { this.wake(sessionID, 50); return true }
+    try {
+      const live = await readTarget(this.stateDir, sessionID)
+      if (live?.targetID !== target.targetID || live.status !== "active" || this.disposed || this.pendingInput(sessionID)) return false
+      const request = { id: randomUUID(), targetID: target.targetID, startedAtMs: Date.now(), sampleID: sample.id, summaryID: summary?.id ?? null, revision: record.revision }
+      let claimed = false
+      await this.settings.mutate(sessionID, (current) => {
+        if (!current.settings.enabled || current.revision !== record.revision || current.runtime.pending || current.runtime.armed === false) return current
+        current.runtime.pending = request
+        current.runtime.reason = "native compaction requested"
+        recordContextEvent(current, "compaction.requested", { targetID: request.targetID, tokens: sample.tokens, thresholdTokens })
+        claimed = true
+        return current
+      })
+      if (!claimed) return Boolean((await this.settings.session(sessionID)).runtime.pending)
+      this.log("info", "Target native compaction requested", { sessionID, tokens: sample.tokens, thresholdTokens })
+      // Dispatch out of the host event hook. The endpoint can wait for the busy loop.
+      const operation = Promise.resolve().then(() => this.adapter.summarize(sessionID, modelIdentity))
+        .then(async () => {
+          if (this.disposed) return
+          const result = contextMeasurement(await this.adapter.messages(sessionID)).summary
+          if (!result || result.id === request.summaryID) throw new Error("Native compaction returned without a completed summary")
+          await this.completed(sessionID, request.id, result)
+        }).catch(async (error) => { if (!this.disposed) await this.fail(sessionID, request, error, error?.code === "OPENCODE_COMPACTION_UNCERTAIN") })
+        .catch((error) => this.log("error", "Context result persistence failed", { sessionID, error: error.message }))
+        .finally(() => { this.requests.delete(sessionID); if (!this.disposed) this.onReady(sessionID) })
+      this.requests.set(sessionID, operation)
+      this.wake(sessionID, this.timeoutMs)
+      return true
+    } finally { if (!leaseOwner) await releaseSchedulerLease(this.stateDir, sessionID, owner, target.targetID) }
+  }
+
+  async completed(sessionID, requestID, summary) {
+    await this.settings.mutate(sessionID, (current) => {
+      if (current.runtime.pending?.id !== requestID) return current
+      const sameRevision = current.runtime.pending.revision === current.revision
+      current.runtime = { ...current.runtime, pending: null, summaryID: summary.id, lastCompletedAtMs: summary.completedAtMs, sample: null, awaitingFresh: sameRevision, armed: !sameRevision, reason: sameRevision ? "waiting for fresh context after compaction" : null, lastError: null, failureAttempts: 0, nextRetryAtMs: null }
+      recordContextEvent(current, "compaction.completed", { summaryID: summary.id })
+      return current
+    })
+    this.clearTimer(sessionID)
+    this.log("info", "Target native compaction completed", { sessionID })
+  }
+
+  async compacting(sessionID) {
+    const target = await readTarget(this.stateDir, sessionID)
+    if (target?.status !== "active") return
+    const summary = contextMeasurement(await this.adapter.messages(sessionID)).summary
+    await this.settings.mutate(sessionID, (current) => {
+      if (current.runtime.pending) return current
+      current.runtime.pending = { id: randomUUID(), targetID: target.targetID, startedAtMs: Date.now(), summaryID: summary?.id ?? null, revision: current.revision, manual: true }
+      current.runtime.reason = "native compaction in progress"
+      recordContextEvent(current, "compaction.observed", { targetID: target.targetID })
+      return current
+    })
+    this.wake(sessionID, this.timeoutMs)
+  }
+
+  async fail(sessionID, request, error, uncertain = false) {
+    let attempts = 0
+    await this.settings.mutate(sessionID, (current) => {
+      if (current.runtime.pending?.id !== request.id) return current
+      attempts = (current.runtime.failureAttempts || 0) + 1
+      Object.assign(current.runtime, { pending: uncertain ? request : null, lastError: String(error.message || error).slice(0, 500), failureAttempts: attempts, reason: uncertain ? "compaction result unknown; Target paused" : "compaction failed", nextRetryAtMs: Date.now() + Math.min(5000, 500 * 2 ** (attempts - 1)) })
+      recordContextEvent(current, "compaction.failed", { targetID: request.targetID, error: current.runtime.lastError, uncertain, attempt: attempts })
+      return current
+    })
+    this.clearTimer(sessionID)
+    if (attempts && (uncertain || attempts >= 3)) await setStoppedStatus(this.stateDir, sessionID, "paused", `Automatic compaction failed: ${error.message}`, request.targetID)
+    else if (attempts) this.wake(sessionID, Math.min(5000, 500 * 2 ** (attempts - 1)))
+    this.log("warn", "Target native compaction failed", { sessionID, error: error.message, uncertain })
+  }
+
+  async status(sessionID) {
+    const target = await readTarget(this.stateDir, sessionID)
+    return contextStatus(await this.settings.session(sessionID), { active: target?.status === "active", supported: typeof this.adapter.summarize === "function" })
+  }
+
+  wake(sessionID, delay) {
+    if (this.disposed || this.timers.has(sessionID)) return
+    const timer = setTimeout(() => {
+      this.timers.delete(sessionID)
+      void this.check(sessionID).then(() => this.onReady(sessionID)).catch((error) => this.log("warn", "Context check failed", { sessionID, error: error.message }))
+    }, Math.max(50, delay))
+    timer.unref?.()
+    this.timers.set(sessionID, timer)
+  }
+
+  clearTimer(sessionID) { clearTimeout(this.timers.get(sessionID)); this.timers.delete(sessionID) }
+  async settled(sessionID) { await this.checks.get(sessionID); await this.requests.get(sessionID) }
+  disposeSession(sessionID) { this.clearTimer(sessionID) }
+  dispose() { this.disposed = true; for (const id of this.timers.keys()) this.clearTimer(id) }
+}
+
 function commandResultPrompt(action, target, continueNow = false, extraContext = "") {
   if (continueNow && target?.status === "active") {
     const blocks = [action, extraContext, continuationPrompt(target)].filter(Boolean)
@@ -1000,10 +1370,23 @@ async function handleSlashCommand(host, $, workspaceDirectory, stateDir, session
     maxNoProgressTurns: options.max_no_progress_turns,
   }
 
+  if (parsed.op === "context") {
+    const command = parseContextCommand(parsed.arguments)
+    const settings = dependencies.contextSettings ?? new ContextSettings(stateDir)
+    const record = await settings.command(sessionID, command)
+    const target = await readTarget(stateDir, sessionID)
+    if (target?.status === "active") await deferNextContinuation(stateDir, sessionID, 1, target.targetID)
+    const text = command.scope === "session" && dependencies.contextStatus
+      ? await dependencies.contextStatus(sessionID)
+      : contextStatus(record, { scope: command.scope, active: target?.status === "active" })
+    return commandResultPrompt(text, target, false)
+  }
+
   if (parsed.op === "view") {
     const target = await readTarget(stateDir, sessionID)
     if (target?.status === "active") await deferNextContinuation(stateDir, sessionID, 1, target.targetID)
-    return commandResultPrompt(`Target control — current state:\n${conciseStatus(target)}`, target, false)
+    const context = dependencies.contextStatus ? `\n\n${await dependencies.contextStatus(sessionID)}` : ""
+    return commandResultPrompt(`Target control — current state:\n${conciseStatus(target)}${context}`, target, false)
   }
 
   if (parsed.op === "help") {
@@ -1013,7 +1396,8 @@ async function handleSlashCommand(host, $, workspaceDirectory, stateDir, session
   }
 
   if (parsed.op === "doctor") {
-    return commandResultPrompt(await targetDiagnostics(client, stateDir, sessionID), null, false)
+    const context = dependencies.contextStatus ? `\n\n${await dependencies.contextStatus(sessionID)}` : ""
+    return commandResultPrompt(`${await targetDiagnostics(client, stateDir, sessionID)}${context}`, null, false)
   }
 
   if (parsed.op === "history" || parsed.op === "explain" || parsed.op === "report") {
@@ -1060,6 +1444,7 @@ async function handleSlashCommand(host, $, workspaceDirectory, stateDir, session
       maxDepth: Math.max(0, Number(options?.descendant_max_depth ?? 6)),
       maxSessions: Math.max(1, Number(options?.descendant_max_sessions ?? 96)),
     })
+    await (dependencies.contextSettings ?? new ContextSettings(stateDir)).session(sessionID)
     const target = await createTarget(stateDir, sessionID, parsed.objective, parsed.tokenBudget, {
       ...createOptions,
       baselineSamples,
@@ -2169,6 +2554,7 @@ async function recordTargetTurnOutcomes(stateDir, sessionID, messages, options =
 
 async function applyTurnOutcome(stateDir, target, message, { automatic, failedExecThreshold, emptyAutomaticThreshold, execToolNames }, persist = true) {
     const info = message?.info ?? message
+    if (info?.summary || info?.mode === "compaction" || info?.agent === "compaction") return target
     const completedAt = Number(info?.time?.completed) || 0
     if (completedAt && completedAt < target.runtime.evaluatedThroughMs) return target
     const c = classifyAssistantTurn(message, { execToolNames })
@@ -2372,6 +2758,7 @@ function parseTargetCommand(raw) {
 
   if (command === "status" || command === "view") return { op: "view" }
   if (command === "help") return { op: "help" }
+  if (command === "context") return { op: "context", arguments: tail }
   if (command === "doctor") return { op: "doctor" }
   if (command === "verify") return { op: "verify", verificationID: tail || null }
   if (command === "history") return { op: "history" }
@@ -2423,6 +2810,8 @@ function targetHelp(commandName = "target", alias = "t") {
     `/${commandName} pause [reason]              Pause the Target`,
     `/${commandName} resume                      Resume a paused/blocked Target`,
     `/${commandName} budget <N|off>              Change budget (does not auto-resume)`,
+    `/${commandName} context [100k|70%|on|off|status|reset]  Configure automatic /compact`,
+    `/${commandName} context default [100k|70%|on|off|status]  Defaults for new sessions`,
     `/${commandName} doctor                      Diagnose state and OpenCode APIs`,
     `/${commandName} verify [gate-id]            Run configured verification gate(s)`,
     `/${commandName} history                     Show lifecycle event history`,
@@ -2653,6 +3042,7 @@ async function processIdle(scheduler, host, stateDir, sessionID, options) {
           markBudgetWrapupSent,
           consumeContinuationDeferral,
           markContinuationStarted,
+          checkContext: (id, settings) => host.context.check(id, settings),
         },
       })
       accountingPhase = phaseContext.value
@@ -2757,13 +3147,29 @@ export const TargetPlugin = async ({ client, $, directory }, rawOptions = {}) =>
   if (await shadowedByLocalInstall(import.meta.url, directory)) return {}
   const options = normalizePluginOptions({ ...rawOptions, worktree: rawOptions.worktree ?? directory ?? process.cwd() })
   const adapter = createOpenCodeAdapter(client, { timeoutMs: options.host_api_timeout_ms })
-  const host = { adapter, client, pendingInput: new Map(), usageUpdates: new Map() }
+  const host = { adapter, client, pendingInput: new Map(), usageUpdates: new Map(), sessionStatus: new Map() }
   const scheduler = new SchedulerState()
   const stateDir = options.state_dir ? String(options.state_dir) : await installedStateDir(import.meta.url) || defaultStateDir()
   const commandName = String(options.command_name || "target")
   const aliasName = options.alias === false ? null : String(options.alias || "t")
   const autoContinue = options.auto_continue !== false
   const maxBudget = options.max_target_token_budget ?? null
+  const contextSettings = new ContextSettings(stateDir)
+  const context = new ContextCompactor({
+    stateDir, settings: contextSettings, adapter,
+    pendingInput: (sessionID) => Boolean(host.pendingInput.get(sessionID)?.size),
+    log: (level, message, extra) => { void log(client, level, message, extra) },
+    onReady: (sessionID) => {
+      if (autoContinue && !host.pendingInput.get(sessionID)?.size) scheduler.scheduleRecheck(sessionID, 50, () => {
+        void (async () => {
+          const status = typeof client.session.status === "function" ? await adapter.status(sessionID) : host.sessionStatus.get(sessionID)
+          if (status === "busy" || status === "retry") { context.wake(sessionID, 250); return }
+          await processIdle(scheduler, host, stateDir, sessionID, options)
+        })().catch((error) => log(client, "warn", "Post-compaction continuation check failed", { sessionID, error: error.message }))
+      })
+    },
+  })
+  host.context = context
 
   await log(client, "info", "OpenCode Target initialized", {
     stateDir,
@@ -2774,7 +3180,7 @@ export const TargetPlugin = async ({ client, $, directory }, rawOptions = {}) =>
   })
 
   return {
-    whenIdle: (sessionID) => scheduler.whenIdle(String(sessionID)),
+    whenIdle: async (sessionID) => { await context.settled(String(sessionID)); await scheduler.whenIdle(String(sessionID)) },
 
     config: async (config) => {
       config.command ??= {}
@@ -2824,6 +3230,7 @@ export const TargetPlugin = async ({ client, $, directory }, rawOptions = {}) =>
           })).optional().describe("Optional acceptance requirements that must have evidence before completion."),
         },
         async execute(args, context) {
+          await contextSettings.session(context.sessionID)
           const baselineSamples = await collectSessionUsage(host.adapter || host, context.sessionID, {
             maxDepth: Math.max(0, Number(options?.descendant_max_depth ?? 6)),
             maxSessions: Math.max(1, Number(options?.descendant_max_sessions ?? 96)),
@@ -2948,6 +3355,8 @@ export const TargetPlugin = async ({ client, $, directory }, rawOptions = {}) =>
           getWorktreeFingerprint,
           targetDiagnostics,
           executeVerificationGate: executeVerificationGateFor,
+          contextSettings,
+          contextStatus: (sessionID) => context.status(sessionID),
         })
         // OpenCode keeps the original parts array; mutate it in place.
         output.parts.splice(0, output.parts.length, { type: "text", text: prompt, synthetic: true })
@@ -2965,6 +3374,7 @@ export const TargetPlugin = async ({ client, $, directory }, rawOptions = {}) =>
     },
 
     "experimental.session.compacting": async (input, output) => {
+      await context.compacting(input.sessionID)
       return applyCompactionContext({ input, output, stateDir, readTarget, compactionTargetContext })
     },
 
@@ -2979,8 +3389,20 @@ export const TargetPlugin = async ({ client, $, directory }, rawOptions = {}) =>
           const updates = host.usageUpdates.get(info.sessionID) || new Map()
           updates.set(info.id, { info })
           host.usageUpdates.set(info.sessionID, updates)
+          if (info.time?.completed) void context.check(info.sessionID).catch((error) => log(client, "warn", "Target context check failed", { sessionID: info.sessionID, error: error.message }))
         }
         return
+      }
+      if (event.type === "session.status") {
+        host.sessionStatus.set(event.properties.sessionID, event.properties.status?.type)
+      }
+      if (event.type === "session.compacted") {
+        void context.check(event.properties.sessionID).catch((error) => log(client, "warn", "Target compaction reconciliation failed", { error: error.message }))
+        return
+      }
+      if (event.type === "session.idle") {
+        host.sessionStatus.set(event.properties.sessionID, "idle")
+        if (!autoContinue) void context.check(event.properties.sessionID).catch((error) => log(client, "warn", "Target context check failed", { error: error.message }))
       }
       if (["permission.asked", "permission.replied", "question.asked", "question.replied", "question.rejected"].includes(event.type)) {
         const properties = event.properties || {}
@@ -2997,6 +3419,8 @@ export const TargetPlugin = async ({ client, $, directory }, rawOptions = {}) =>
       }
       const route = resolveEventAction(event, autoContinue)
       if (route.action === "dispose") {
+        context.dispose()
+        host.sessionStatus.clear()
         host.pendingInput.clear()
         host.usageUpdates.clear()
         scheduler.dispose()
@@ -3006,6 +3430,8 @@ export const TargetPlugin = async ({ client, $, directory }, rawOptions = {}) =>
       const { sessionID } = route
 
       if (route.action === "dispose-session") {
+        context.disposeSession(sessionID)
+        host.sessionStatus.delete(sessionID)
         host.pendingInput.delete(sessionID)
         host.usageUpdates.delete(sessionID)
         scheduler.disposeSession(sessionID)

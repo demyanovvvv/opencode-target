@@ -12,6 +12,8 @@
 | `solid-js` | `^1.9.12` | TUI build and renderer smoke test |
 | OpenCode plugin loading | Local plugin or package plugin configuration | OpenCode plugin docs |
 | Persisted Target schema | Versions `2` and `3` | Core migration/quarantine tests |
+| Context settings schema | Version `1`, independent of Target schema | Settings/restart tests |
+| Native auto-compaction | v1 `session.summarize`, compaction hooks and events | SDK 1.18.30 contract; source/generated integration tests |
 
 The package keeps `@opencode-ai/plugin` optional at runtime so a local self-contained plugin can
 be copied into OpenCode. It is a development dependency for the repository's smoke tests.
@@ -20,6 +22,13 @@ The compact inline indicator uses the stock `session_prompt_right` slot, verifie
 OpenCode 1.18.34. Target installation/update does not build or replace OpenCode. The server
 plugin remains independently usable. SDK 1.18.30 is the pinned test dependency; the declared
 peer range is not a claim that every subsequent host version has been exercised.
+
+Threshold-driven compaction uses the v1 SDK's `path: { id }` summarize endpoint with the selected
+provider/model and `auto: false`, then leaves continuation to Target. The installed 1.18.30 SDK
+types omit the optional `auto` field, which the 1.18.30 host endpoint accepts (its default is false).
+The endpoint creates a native compaction task and joins/starts the host loop. Integration tests use
+a controlled host client; they do not claim a live provider compaction run. The local development
+executable is a custom 1.19.0 build, so upstream 1.18.30 behavior is checked against tagged source.
 
 Target installation requires Node.js 22+ and installs only plugin files and configuration.
 It does not inspect shared component manifests or build, migrate, or replace host binaries.

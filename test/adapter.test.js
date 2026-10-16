@@ -2,6 +2,29 @@ import assert from "node:assert/strict"
 import test from "node:test"
 import { createGitAdapter, createOpenCodeAdapter } from "../src/adapter.js"
 
+test("native compaction uses the session summarize endpoint and passes the selected model", async () => {
+  const calls = []
+  const adapter = createOpenCodeAdapter({ session: { summarize: async (input) => { calls.push(input); return { data: true } } } })
+  assert.equal(await adapter.summarize("s", { providerID: "p", modelID: "m" }), true)
+  assert.deepEqual(calls[0].path, { id: "s" })
+  assert.deepEqual(calls[0].body, { providerID: "p", modelID: "m", auto: false })
+  assert.equal(typeof createOpenCodeAdapter({ session: {} }).summarize, "undefined")
+})
+
+test("compaction timeout fences retries while the original request is unsettled", async () => {
+  let calls = 0
+  const adapter = createOpenCodeAdapter({ session: { summarize: () => { calls += 1; return new Promise(() => {}) } } }, { compactionTimeoutMs: 10 })
+  await assert.rejects(adapter.summarize("s", { providerID: "p", modelID: "m" }), (error) => error.code === "OPENCODE_COMPACTION_UNCERTAIN")
+  await assert.rejects(adapter.summarize("s", { providerID: "p", modelID: "m" }), (error) => error.code === "OPENCODE_COMPACTION_UNCERTAIN")
+  assert.equal(calls, 1)
+})
+
+test("model lookup resolves configured windows by provider identity", async () => {
+  const adapter = createOpenCodeAdapter({ provider: { list: async () => ({ data: { all: [{ id: "p", models: { m: { limit: { context: 200000 } } } }] } }) } })
+  assert.equal((await adapter.model("p", "m")).limit.context, 200000)
+  assert.equal(await adapter.model("missing", "m"), null)
+})
+
 test("timed-out prompts cancel transport and never overlap an unsettled request", async () => {
   let calls = 0
   let signal

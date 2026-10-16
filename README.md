@@ -348,6 +348,42 @@ Delete persisted Target state.
 
 Show command help.
 
+### Automatic context compaction
+
+```text
+/target context default 100k           Default threshold for new sessions
+/target context 100k                   Compact at 100,000 context tokens
+/target context 70%                    Compact at 70% of the current model window
+/target context [on|off|status|reset]   Control or inspect automatic compaction
+```
+
+While a Target is active, Target monitors the most recent completed model step and requests the
+native OpenCode `/compact` mechanism through `session.summarize` when the threshold is reached.
+OpenCode produces its standard summary; Target preserves the durable objective and resumes through
+its existing scheduler. Token inputs accept `100000`, `100_000`, `100k`, `1.5m`; percentages accept
+whole numbers from `1%` to `99%` and follow the currently selected model's context window.
+The threshold triggers a request, so a busy session can exceed it before compaction is processed.
+
+`/target context` or `status` shows enabled state, source, threshold, last measured context,
+model window, pending request, errors and recent diagnostic events. Context size includes cached
+tokens and is separate from cumulative Target budget usage. Summary input tokens are never treated
+as the post-compaction context measurement. Child-session contexts are not added to the root.
+
+`context 100k` or `70%` enables a session override. `off` retains the chosen threshold; `on` restores
+it (a threshold must have been set). `reset` copies the current defaults. `context default` shows
+defaults; `context default 70%`, `default off`, and `default on` update them for new sessions.
+Defaults are scoped to the installation's state directory. Sessions snapshot defaults on first use
+and retain their settings across restarts and `/target clear`; existing sessions use `reset` to
+adopt changed defaults. The feature starts disabled. Settings can be changed before creating a goal.
+
+Only active root Targets request compaction. Paused, stopped and completed goals do not trigger it.
+With `auto_continue: false`, compaction still works but no new work turn is dispatched automatically.
+Manual/native compaction is reconciled, duplicate requests are fenced, and an undersized threshold
+does not cause an immediate compaction loop. Increase the threshold if status reports that the
+first fresh context is still above it. Three explicit request failures or an uncertain result pause
+the affected Target; inspect `context status` and `/target doctor` before resuming.
+Disabling this feature does not disable OpenCode's own overflow compaction, which may trigger earlier.
+
 ## Model tools
 
 Target registers three tools, intentionally mirroring the authority split of Codex Goal:
