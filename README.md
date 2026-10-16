@@ -6,14 +6,17 @@
 
 [Releases](https://github.com/demyanovvvv/opencode-target/releases) · [Changelog](CHANGELOG.md) · [Compatibility](docs/compatibility.md) · [Architecture](docs/architecture.md) · [Issues](https://github.com/demyanovvvv/opencode-target/issues) · [MIT license](LICENSE)
 
-**OpenCode plugin for persistent goals, automatic continuation, token budgets, and evidence-based completion checks.**
+**OpenCode plugin for persistent goals, automatic continuation, context compaction, token budgets, and evidence-based completion checks.**
 
-Latest release: [**v0.6.0**](https://github.com/demyanovvvv/opencode-target/releases/tag/v0.6.0) · [Download archive](https://github.com/demyanovvvv/opencode-target/releases/download/v0.6.0/opencode-target-0.6.0.tgz)
+Latest release: [**v0.7.0**](https://github.com/demyanovvvv/opencode-target/releases/tag/v0.7.0) · [Download archive](https://github.com/demyanovvvv/opencode-target/releases/download/v0.7.0/opencode-target-0.7.0.tgz)
 
 Target saves an objective outside the conversation history and starts another model turn while that
 objective remains active. It tracks token usage and elapsed active time, supports requirement evidence
 and explicitly requested verification commands, and stops on configured limits or repeated failures.
 An animated TUI indicator shows the current state and token usage. Inspired by Codex `/goal`.
+
+**New in v0.7.0:** automatically run native `/compact` at a context threshold such as
+`100k` tokens or `70%` of the current model window. Enable it with `/target context 100k`.
 
 Completion is audited by the model using requirements and available evidence; Target does not guarantee
 that an objective will be achieved or automatically run every verification command.
@@ -70,8 +73,8 @@ Choose the language for the installer output:
 ### Automatic installation — recommended
 
 Requires Node.js 22+ and a compatible OpenCode version; see the [compatibility matrix](docs/compatibility.md).
-Download [opencode-target-0.6.0.tgz](https://github.com/demyanovvvv/opencode-target/releases/download/v0.6.0/opencode-target-0.6.0.tgz),
-extract it, and open the extracted `package` directory. Run the installer there; v0.6.0 includes
+Download [opencode-target-0.7.0.tgz](https://github.com/demyanovvvv/opencode-target/releases/download/v0.7.0/opencode-target-0.7.0.tgz),
+extract it, and open the extracted `package` directory. Run the installer there; v0.7.0 includes
 local/global scope selection and standalone uninstallers in both languages.
 
 ```sh
@@ -107,11 +110,17 @@ sh uninstall.sh --global
 
 ### Update
 
-Stop OpenCode, download and extract the newer archive, then rerun its installer with the same scope
+Stop OpenCode, download and extract the [v0.7.0 archive](https://github.com/demyanovvvv/opencode-target/releases/download/v0.7.0/opencode-target-0.7.0.tgz),
+open its `package` directory, then rerun its installer with the same scope
 and project directory. Both plugins are replaced. Existing configuration
 options and saved Targets are preserved; the installer reports the previous and archive versions,
-for example `Updated OpenCode Target: 0.5.0 → 0.6.0`. It installs the archive version without downloading another release.
+for example `Updated OpenCode Target: 0.6.0 → 0.7.0`. It installs the archive version without downloading another release.
 Restart OpenCode after updating.
+
+After upgrading to v0.7.0, automatic context compaction starts disabled. To enable it for the
+current dialogue, run `/target context 100k`. For future sessions, run
+`/target context default 100k`; use `/target context reset` to copy that default into the current
+session. Existing goals and context settings are preserved by later updates.
 
 ### Uninstall
 
@@ -352,6 +361,7 @@ Show command help.
 
 ```text
 /target context default 100k           Default threshold for new sessions
+/target context default [on|off|status] Control or inspect defaults
 /target context 100k                   Compact at 100,000 context tokens
 /target context 70%                    Compact at 70% of the current model window
 /target context [on|off|status|reset]   Control or inspect automatic compaction

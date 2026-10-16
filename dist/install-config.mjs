@@ -1579,7 +1579,7 @@ async function installTargetFiles({ configDir, root, tuiConfig = null, uninstall
           await copyFile(path.join(root, "dist", source), path.join(configDir, destination));
         }
         await configureTuiConfig({ configDir, tuiConfig });
-        const version = true ? "0.6.0" : JSON.parse(await readFile(path.join(root, "package.json"), "utf8")).version;
+        const version = true ? "0.7.0" : JSON.parse(await readFile(path.join(root, "package.json"), "utf8")).version;
         await mkdir(path.join(configDir, "target"), { recursive: true });
         const configPaths = ["opencode.json", "opencode.jsonc", "tui.json", "tui.jsonc"].map((name) => path.join(configDir, name));
         if (tuiConfig) configPaths.push(path.resolve(tuiConfig));

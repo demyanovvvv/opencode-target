@@ -1,7 +1,7 @@
 {
   "name": "opencode-target",
-  "version": "0.6.0",
-  "description": "OpenCode plugin for persistent goals, automatic continuation, token budgets, and evidence-based completion checks.",
+  "version": "0.7.0",
+  "description": "OpenCode plugin for persistent goals, automatic continuation, context compaction, token budgets, and evidence-based completion checks.",
   "private": true,
   "type": "module",
   "main": "./src/server.js",
@@ -48,6 +48,7 @@
     "target",
     "persistent-state",
     "automatic-continuation",
+    "context-compaction",
     "token-budget",
     "token-accounting",
     "verification",
