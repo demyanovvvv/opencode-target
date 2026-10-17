@@ -1170,6 +1170,7 @@ class ContextCompactor {
   constructor({ stateDir, settings, adapter, timeoutMs = 120000, pendingInput = () => false, onReady = () => {}, log = () => {} }) {
     Object.assign(this, { stateDir, settings, adapter, timeoutMs, pendingInput, onReady, log })
     this.checks = new Map()
+    this.rechecks = new Set()
     this.requests = new Map()
     this.timers = new Map()
     this.disposed = false
@@ -1177,8 +1178,18 @@ class ContextCompactor {
 
   check(sessionID, options = {}) {
     if (this.disposed) return Promise.resolve(false)
-    if (this.checks.has(sessionID)) return this.checks.get(sessionID)
-    const operation = this.evaluate(sessionID, options).finally(() => this.checks.delete(sessionID))
+    if (this.checks.has(sessionID)) {
+      this.rechecks.add(sessionID)
+      return this.checks.get(sessionID)
+    }
+    const operation = (async () => {
+      let pending
+      do {
+        this.rechecks.delete(sessionID)
+        pending = await this.evaluate(sessionID, options)
+      } while (!this.disposed && this.rechecks.delete(sessionID))
+      return pending
+    })().finally(() => this.checks.delete(sessionID))
     this.checks.set(sessionID, operation)
     return operation
   }
@@ -1187,7 +1198,7 @@ class ContextCompactor {
     const target = await readTarget(this.stateDir, sessionID)
     if (!target) return false
     let record = await this.settings.session(sessionID)
-    if (!record.settings.enabled && !record.runtime.pending) return this.requests.has(sessionID)
+    if (!record.settings.enabled && !record.runtime.pending) return false
     const messages = await this.adapter.messages(sessionID)
     const measurement = contextMeasurement(messages)
     const { sample, summary } = measurement
@@ -1197,11 +1208,10 @@ class ContextCompactor {
         await this.completed(sessionID, pending.id, summary)
         record = await this.settings.session(sessionID)
       } else {
-        if (!this.requests.has(sessionID) && Date.now() - pending.startedAtMs >= this.timeoutMs) {
+        if (!pending.uncertainAtMs && !this.requests.has(sessionID) && Date.now() - pending.startedAtMs >= this.timeoutMs) {
           await this.fail(sessionID, pending, new Error("Compaction result could not be confirmed after restart or timeout"), true)
-          return true
         }
-        this.wake(sessionID, Math.max(50, this.timeoutMs - (Date.now() - pending.startedAtMs)))
+        this.wake(sessionID, pending.uncertainAtMs ? 1000 : Math.max(1000, this.timeoutMs - (Date.now() - pending.startedAtMs)))
         return true
       }
     }
@@ -1211,7 +1221,9 @@ class ContextCompactor {
         return current
       })
     }
-    if (this.requests.has(sessionID)) return true
+    // Summary completion releases work even if its transport is still settling.
+    // Keep the transport fence only for subsequent compaction requests.
+    if (this.requests.has(sessionID)) return false
     if (target.status !== "active") return false
     if (!record.settings.enabled) return false
     if (!sample) return false
@@ -1269,7 +1281,7 @@ class ContextCompactor {
           await this.completed(sessionID, request.id, result)
         }).catch(async (error) => { if (!this.disposed) await this.fail(sessionID, request, error, error?.code === "OPENCODE_COMPACTION_UNCERTAIN") })
         .catch((error) => this.log("error", "Context result persistence failed", { sessionID, error: error.message }))
-        .finally(() => { this.requests.delete(sessionID); if (!this.disposed) this.onReady(sessionID) })
+        .finally(() => { this.requests.delete(sessionID) })
       this.requests.set(sessionID, operation)
       this.wake(sessionID, this.timeoutMs)
       return true
@@ -1277,15 +1289,19 @@ class ContextCompactor {
   }
 
   async completed(sessionID, requestID, summary) {
+    let completed = false
     await this.settings.mutate(sessionID, (current) => {
       if (current.runtime.pending?.id !== requestID) return current
       const sameRevision = current.runtime.pending.revision === current.revision
       current.runtime = { ...current.runtime, pending: null, summaryID: summary.id, lastCompletedAtMs: summary.completedAtMs, sample: null, awaitingFresh: sameRevision, armed: !sameRevision, reason: sameRevision ? "waiting for fresh context after compaction" : null, lastError: null, failureAttempts: 0, nextRetryAtMs: null }
       recordContextEvent(current, "compaction.completed", { summaryID: summary.id })
+      completed = true
       return current
     })
+    if (!completed) return
     this.clearTimer(sessionID)
     this.log("info", "Target native compaction completed", { sessionID })
+    if (!this.disposed) this.onReady(sessionID)
   }
 
   async compacting(sessionID) {
@@ -1304,17 +1320,30 @@ class ContextCompactor {
 
   async fail(sessionID, request, error, uncertain = false) {
     let attempts = 0
+    let waiting = false
+    let changed = false
     await this.settings.mutate(sessionID, (current) => {
       if (current.runtime.pending?.id !== request.id) return current
+      if (uncertain) {
+        waiting = true
+        if (current.runtime.pending.uncertainAtMs) return current
+        current.runtime.pending = { ...current.runtime.pending, uncertainAtMs: Date.now() }
+        Object.assign(current.runtime, { lastError: String(error.message || error).slice(0, 500), reason: "waiting for compaction result", nextRetryAtMs: null })
+        recordContextEvent(current, "compaction.uncertain", { targetID: request.targetID, error: current.runtime.lastError })
+        changed = true
+        return current
+      }
       attempts = (current.runtime.failureAttempts || 0) + 1
-      Object.assign(current.runtime, { pending: uncertain ? request : null, lastError: String(error.message || error).slice(0, 500), failureAttempts: attempts, reason: uncertain ? "compaction result unknown; Target paused" : "compaction failed", nextRetryAtMs: Date.now() + Math.min(5000, 500 * 2 ** (attempts - 1)) })
+      Object.assign(current.runtime, { pending: null, lastError: String(error.message || error).slice(0, 500), failureAttempts: attempts, reason: "compaction failed", nextRetryAtMs: Date.now() + Math.min(5000, 500 * 2 ** (attempts - 1)) })
       recordContextEvent(current, "compaction.failed", { targetID: request.targetID, error: current.runtime.lastError, uncertain, attempt: attempts })
+      changed = true
       return current
     })
-    this.clearTimer(sessionID)
-    if (attempts && (uncertain || attempts >= 3)) await setStoppedStatus(this.stateDir, sessionID, "paused", `Automatic compaction failed: ${error.message}`, request.targetID)
+    if (changed) this.clearTimer(sessionID)
+    if (attempts >= 3) await setStoppedStatus(this.stateDir, sessionID, "paused", `Automatic compaction failed: ${error.message}`, request.targetID)
     else if (attempts) this.wake(sessionID, Math.min(5000, 500 * 2 ** (attempts - 1)))
-    this.log("warn", "Target native compaction failed", { sessionID, error: error.message, uncertain })
+    if (waiting) this.wake(sessionID, 1000)
+    if (changed) this.log("warn", uncertain ? "Target native compaction awaiting result" : "Target native compaction failed", { sessionID, error: error.message, uncertain })
   }
 
   async status(sessionID) {
@@ -1326,7 +1355,7 @@ class ContextCompactor {
     if (this.disposed || this.timers.has(sessionID)) return
     const timer = setTimeout(() => {
       this.timers.delete(sessionID)
-      void this.check(sessionID).then(() => this.onReady(sessionID)).catch((error) => this.log("warn", "Context check failed", { sessionID, error: error.message }))
+      void this.check(sessionID).then((pending) => { if (!pending && !this.disposed) this.onReady(sessionID) }).catch((error) => this.log("warn", "Context check failed", { sessionID, error: error.message }))
     }, Math.max(50, delay))
     timer.unref?.()
     this.timers.set(sessionID, timer)
@@ -1334,8 +1363,8 @@ class ContextCompactor {
 
   clearTimer(sessionID) { clearTimeout(this.timers.get(sessionID)); this.timers.delete(sessionID) }
   async settled(sessionID) { await this.checks.get(sessionID); await this.requests.get(sessionID) }
-  disposeSession(sessionID) { this.clearTimer(sessionID) }
-  dispose() { this.disposed = true; for (const id of this.timers.keys()) this.clearTimer(id) }
+  disposeSession(sessionID) { this.clearTimer(sessionID); this.rechecks.delete(sessionID) }
+  dispose() { this.disposed = true; this.rechecks.clear(); for (const id of this.timers.keys()) this.clearTimer(id) }
 }
 
 function commandResultPrompt(action, target, continueNow = false, extraContext = "") {

@@ -26,13 +26,14 @@ async function fixture(run) {
   const history = [message("work", 100000)]
   const calls = []
   let finish
+  let reject
   const adapter = {
     messages: async () => history,
     model: async () => ({ limit: { context: 200000 } }),
-    summarize: (sessionID, model) => { calls.push({ sessionID, model }); return new Promise((resolve) => { finish = resolve }) },
+    summarize: (sessionID, model) => { calls.push({ sessionID, model }); return new Promise((resolve, fail) => { finish = resolve; reject = fail }) },
   }
   const controller = new ContextCompactor({ stateDir: dir, settings, adapter, timeoutMs: 10000 })
-  try { await run({ dir, settings, history, calls, controller, finish: () => finish?.(true) }) }
+  try { await run({ dir, settings, history, calls, controller, adapter, finish: () => finish?.(true), reject: (error) => reject?.(error) }) }
   finally { controller.dispose(); finish?.(true); await rm(dir, { recursive: true, force: true }) }
 }
 
@@ -119,19 +120,111 @@ test("simultaneous controllers share the durable compaction fence", async () => 
   })
 })
 
-test("uncertain compaction pauses the old Target without retrying the native request", async () => {
-  await fixture(async ({ dir, controller, settings, calls }) => {
-    controller.adapter.summarize = async () => {
-      calls.push("request")
-      const error = new Error("transport timed out")
-      error.code = "OPENCODE_COMPACTION_UNCERTAIN"
-      throw error
-    }
+test("an uncertain compaction waits without pausing or counting the same request as repeated failures", async () => {
+  await fixture(async ({ dir, controller, settings, reject, calls }) => {
     await controller.check("s")
-    await controller.settled("s")
-    assert.equal((await readTarget(dir, "s")).status, "paused")
-    assert.ok((await settings.session("s")).runtime.pending)
+    const request = controller.requests.get("s")
+    reject(Object.assign(new Error("Summarize transport timed out"), { code: "OPENCODE_COMPACTION_UNCERTAIN" }))
+    await request
+    assert.equal((await readTarget(dir, "s")).status, "active")
+    await settings.mutate("s", (record) => { record.runtime.pending.startedAtMs = Date.now() - 121000; return record })
+    for (let i = 0; i < 3; i++) assert.equal(await controller.check("s"), true)
+    const { runtime } = await settings.session("s")
+    assert.ok(runtime.pending)
+    assert.equal(runtime.failureAttempts ?? 0, 0)
+    assert.equal(runtime.events.filter((event) => event.type === "compaction.uncertain").length, 1)
     assert.equal(calls.length, 1)
+  })
+})
+
+test("restart polling reconciles a late summary and wakes continuation without another idle event", async () => {
+  await fixture(async ({ dir, controller, settings, history, calls, adapter }) => {
+    await controller.check("s")
+    controller.dispose()
+    await settings.mutate("s", (record) => { record.runtime.pending.startedAtMs = Date.now() - 121000; return record })
+    let ready = 0
+    const restarted = new ContextCompactor({ stateDir: dir, settings, adapter, onReady: () => { ready += 1 } })
+    try {
+      for (let i = 0; i < 3; i++) assert.equal(await restarted.check("s"), true)
+      assert.equal((await readTarget(dir, "s")).status, "active")
+      history.push(message("late-summary", 110000, Date.now() + 10, true))
+      assert.equal(await restarted.check("s"), false)
+      assert.equal(await restarted.check("s"), false)
+      assert.equal(ready, 1)
+      assert.equal((await settings.session("s")).runtime.pending, null)
+      assert.equal((await settings.session("s")).runtime.failureAttempts, 0)
+      assert.equal(calls.length, 1)
+    } finally { restarted.dispose() }
+  })
+})
+
+test("a completed summary releases continuation even if the summarize transport has not settled", async () => {
+  await fixture(async ({ controller, settings, history, calls }) => {
+    await controller.check("s")
+    history.push(message("summary-before-response", 110000, Date.now() + 10, true))
+    assert.equal(await controller.check("s"), false)
+    assert.equal((await settings.session("s")).runtime.pending, null)
+    assert.equal(calls.length, 1)
+  })
+})
+
+test("a completion arriving during an older history check is reconciled instead of being lost", async () => {
+  await fixture(async ({ controller, settings, history }) => {
+    await controller.check("s")
+    let release
+    let started
+    const ready = new Promise((resolve) => { started = resolve })
+    let reads = 0
+    controller.adapter.messages = async () => {
+      if (reads++ > 0) return history
+      const snapshot = [...history]
+      started()
+      await new Promise((resolve) => { release = resolve })
+      return snapshot
+    }
+    const first = controller.check("s")
+    await ready
+    history.push(message("racing-summary", 110000, Date.now() + 10, true))
+    const completion = controller.check("s")
+    release()
+    assert.deepEqual(await Promise.all([first, completion]), [false, false])
+    assert.equal((await settings.session("s")).runtime.pending, null)
+  })
+})
+
+test("a late summary never resumes a Target manually paused during the uncertain request", async () => {
+  await fixture(async ({ dir, controller, settings, history, reject }) => {
+    await controller.check("s")
+    const request = controller.requests.get("s")
+    reject(Object.assign(new Error("Summarize transport timed out"), { code: "OPENCODE_COMPACTION_UNCERTAIN" }))
+    await request
+    const target = await readTarget(dir, "s")
+    await setStoppedStatus(dir, "s", "paused", "User requested a pause", target.targetID)
+    history.push(message("late-summary", 110000, Date.now() + 10, true))
+    assert.equal(await controller.check("s"), false)
+    const after = await readTarget(dir, "s")
+    assert.equal(after.status, "paused")
+    assert.equal(after.stopReason, "User requested a pause")
+    assert.equal((await settings.session("s")).runtime.pending, null)
+  })
+})
+
+test("a late summary cannot account old usage against a replacement Target", async () => {
+  await fixture(async ({ dir, controller, settings, history, reject }) => {
+    await controller.check("s")
+    const request = controller.requests.get("s")
+    reject(Object.assign(new Error("Summarize transport timed out"), { code: "OPENCODE_COMPACTION_UNCERTAIN" }))
+    await request
+    const old = await readTarget(dir, "s")
+    await setStoppedStatus(dir, "s", "complete", "Finished", old.targetID)
+    const replacement = await createTarget(dir, "s", "A new objective")
+    history.push(message("late-old-summary", 110000, Date.now() + 10, true))
+    assert.equal(await controller.check("s"), false)
+    const after = await readTarget(dir, "s")
+    assert.equal(after.targetID, replacement.targetID)
+    assert.equal(after.status, "active")
+    assert.equal(after.tokensUsed, 0)
+    assert.equal((await settings.session("s")).runtime.pending, null)
   })
 })
 

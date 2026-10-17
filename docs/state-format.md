@@ -47,6 +47,10 @@ arming state, bounded retry state, and up to 50 diagnostic events. `pending` is 
 with ID, expected `targetID`, start time, previous summary ID and settings revision. It is written
 before the API call and survives restart. An uncertain result preserves `pending` until a newer
 completed summary is observed. A settings command rearms the threshold but never erases that fence.
+An optional `pending.uncertainAtMs` records the first timeout/unknown-result observation; it keeps
+the request fenced without pausing the Target or increasing `failureAttempts`. The corresponding
+`compaction.uncertain` event is emitted once per request. Older records without this marker remain
+readable. Only confirmed request failures count toward the three-failure pause policy.
 Old Target schemas require no migration; context records are independent and initially absent.
 
 ## Schema

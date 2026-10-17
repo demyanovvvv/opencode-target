@@ -13,10 +13,15 @@ threshold and does not disable the host's own overflow compaction.
 
 If the retained context is above the threshold immediately after a summary, increase the threshold.
 If compaction fails three times, inspect the host error and resume explicitly once corrected.
-If a request timed out or its result is unknown, the Target pauses and the durable request fence
-remains: allow the host operation to settle or run manual `/compact`, then resume. A newer completed
-summary clears the fence; settings toggles do not discard an operation whose outcome is unknown.
-The controller checks the history on resumed activity rather than blindly submitting a duplicate.
+If a request times out after two minutes or its result is unknown, Target stays active but waits
+behind its durable request fence. It polls for the completed summary without repeating the compact;
+an unknown result is recorded once rather than counted as repeated failures. Late completion wakes
+the scheduler automatically, after the host becomes idle and pending input is resolved. History
+reconciliation also works after restart. Settings toggles do not discard the pending operation.
+If the host operation never completes, inspect its state/errors and use manual `/compact` to produce
+a newer completed summary. A manually paused/stopped Target is never resumed by compaction.
+Older installations may already have paused a Target on timeout: update, restart OpenCode and use
+`/target resume` explicitly after confirming compaction completed. The fix does not undo old pauses.
 
 ## Confirm installation
 

@@ -390,8 +390,12 @@ Only active root Targets request compaction. Paused, stopped and completed goals
 With `auto_continue: false`, compaction still works but no new work turn is dispatched automatically.
 Manual/native compaction is reconciled, duplicate requests are fenced, and an undersized threshold
 does not cause an immediate compaction loop. Increase the threshold if status reports that the
-first fresh context is still above it. Three explicit request failures or an uncertain result pause
-the affected Target; inspect `context status` and `/target doctor` before resuming.
+first fresh context is still above it. Three explicit request failures pause the affected Target;
+inspect `context status` and `/target doctor` before resuming. A two-minute request timeout only
+marks the result as unknown: Target retains its active state and waits behind the pending request
+fence, without submitting another compact. A late completed summary releases that fence and wakes
+the scheduler, including after restart. Manual pauses and other stopped states remain stopped.
+If an older installation already paused a Target on timeout, resume it explicitly after updating.
 Disabling this feature does not disable OpenCode's own overflow compaction, which may trigger earlier.
 
 ## Model tools

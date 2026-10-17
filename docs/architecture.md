@@ -148,9 +148,16 @@ dispatches the subsequent work turn, respecting `auto_continue` and input bounda
 
 The durable request ID and settings revision fence duplicate events, processes and stale callbacks.
 The compaction hook observes manual/native requests too. Completed summaries reconcile pending
-requests after restart. An uncertain request retains its fence and pauses its expected Target;
-explicit host failures retry at most three times. A two-minute result timeout is used independently
-of short host read timeouts. The next fresh measurement rearms only below the threshold, preventing
+requests after restart. An uncertain request retains its fence without changing Target lifecycle;
+it records uncertainty once and polls history once per second rather than resubmitting compaction
+or counting each observation as another failure. Explicit host failures retry at most three times
+and then pause the expected Target. A two-minute result timeout is used independently of short host
+read timeouts. A completed summary releases the durable fence even if the original HTTP request is
+still unsettled; that transport fence prevents only another compaction. Completion wakes the normal
+scheduler, which checks host busy/retry and input boundaries before dispatch. An event arriving during
+an older history read requests a coalesced reread so summary completion cannot be lost. No compaction
+callback resumes a paused/stopped Target or changes a replacement's lifecycle.
+The next fresh measurement rearms only below the threshold, preventing
 immediate loops when the retained context is already too large. Summary tokens remain billable,
 but summaries do not consume pending automatic-work classification or progress streaks.
 

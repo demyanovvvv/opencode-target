@@ -5,6 +5,17 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- Keep slow native compactions pending after the two-minute request timeout instead of pausing
+  active Targets. Record uncertainty once and reconcile late summaries, including after restart,
+  without duplicate compaction requests or inflated failure counts.
+- Wake Target continuation when a completed summary is observed, even before the summarize HTTP
+  request settles, and reread history when completion races an in-progress check. Host busy/input
+  boundaries and manual pauses remain respected.
+
 ## [0.7.0] - 2026-10-16
 
 Automatic native context compaction for active Targets. Set a token or percentage threshold,
