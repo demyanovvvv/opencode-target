@@ -241,6 +241,11 @@ output handling.
 
 ## Accounting
 
+New Targets use normalized `input + cache.write + output + reasoning`. The formula
+below is retained only for legacy states. Watermarks must never be evicted; recorded
+step-finish request sums replace message snapshots rather than being added to them.
+See [recovery](token-accounting-recovery.md) for migration boundaries.
+
 Per assistant message:
 
 ```text

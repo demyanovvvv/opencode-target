@@ -525,6 +525,11 @@ Target B must not receive A's mutation
 
 ## Token accounting
 
+New Targets count OpenCode-normalized `input + cache.write + output + reasoning`.
+Cache reads are already excluded from input. Usage watermarks are retained without
+eviction. Existing Targets preserve their legacy formula until explicit reconstruction;
+the formula below describes legacy states. See [recovery](docs/token-accounting-recovery.md).
+
 Target follows the important Codex Goal accounting rule as closely as OpenCode's exposed token data allows:
 
 ```text

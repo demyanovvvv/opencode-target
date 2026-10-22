@@ -1,5 +1,10 @@
 # Persisted State Format
 
+Accounting update: watermarks are no longer capped (`accounting.maxEntries: null`).
+New states carry `accounting.tokenSemantics: "opencode-normalized-v1"`; absent markers
+retain the legacy formula documented below. See [recovery](token-accounting-recovery.md)
+for normalization, request records and explicit historical reconstruction.
+
 Target stores one JSON document per OpenCode session. The file is selected by a URL-safe
 base64 encoding of the session ID:
 

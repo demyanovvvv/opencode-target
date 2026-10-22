@@ -213,19 +213,19 @@ test("token accounting uses non-cached input + output, excludes plan mode, split
       { sessionID: "child", message: assistant("c1", { input: 50, cached: 10, output: 15 }) },
     ]
     let updated = await accountTargetUsage(dir, "root", samples, { expectedTargetID: m.targetID })
-    assert.equal(updated.rootTokensUsed, 80)
-    assert.equal(updated.descendantTokensUsed, 55)
-    assert.equal(updated.tokensUsed, 135)
+    assert.equal(updated.rootTokensUsed, 120)
+    assert.equal(updated.descendantTokensUsed, 65)
+    assert.equal(updated.tokensUsed, 185)
 
     updated = await accountTargetUsage(dir, "root", samples, { expectedTargetID: m.targetID })
-    assert.equal(updated.tokensUsed, 135)
+    assert.equal(updated.tokensUsed, 185)
 
     // Same assistant message can grow while streaming; only the positive delta is added.
     updated = await accountTargetUsage(dir, "root", [
       { sessionID: "root", message: assistant("m1", { input: 140, cached: 40, output: 30 }) },
     ], { expectedTargetID: m.targetID })
-    assert.equal(updated.rootTokensUsed, 130)
-    assert.equal(updated.tokensUsed, 185)
+    assert.equal(updated.rootTokensUsed, 170)
+    assert.equal(updated.tokensUsed, 235)
   })
 })
 
@@ -287,24 +287,47 @@ test("a pre-Target turn missing from activation snapshot is baselined on first o
   })
 })
 
-test("Target creation rejects a baseline larger than the durable watermark capacity", async () => {
+test("Target preserves more than 12000 watermarks through persistence, replay and new requests", async () => {
   await withState(async (dir) => {
     const baselineSamples = Array.from({ length: 12_001 }, (_, index) => ({
       sessionID: "oversized",
       message: assistant(`old-${index}`, { input: 1, created: Date.now() - 1000 }),
     }))
 
-    await assert.rejects(
-      createTarget(dir, "oversized", "Cannot safely truncate baseline", null, { baselineSamples }),
-      (error) => error.code === "TARGET_BASELINE_TOO_LARGE",
-    )
-    assert.equal(await readTarget(dir, "oversized"), null)
+    const target = await createTarget(dir, "oversized", "Keep complete baseline", null, { baselineSamples })
+    assert.equal(Object.keys((await readTarget(dir, "oversized")).usageByMessage).length, 12_001)
+    const samples = [...baselineSamples, ...Array.from({ length: 12_001 }, (_, i) => ({
+      sessionID: i % 2 ? "child" : "oversized",
+      message: assistant(`new-${i}`, { input: 2, created: target.createdAtMs + 1 }),
+    }))]
+    const options = { expectedTargetID: target.targetID }
+    const first = await accountTargetUsage(dir, "oversized", samples, options)
+    assert.equal(first.tokensUsed, 24_002)
+    assert.equal(first.rootTokensUsed, 12_002)
+    assert.equal(first.descendantTokensUsed, 12_000)
+    assert.equal((await accountTargetUsage(dir, "oversized", samples, options)).tokensUsed, first.tokensUsed)
+    assert.equal((await accountTargetUsage(dir, "oversized", [], options)).tokensUsed, first.tokensUsed)
+    assert.equal((await readTarget(dir, "oversized")).accounting.trackedMessages, 24_002)
   })
 })
 
 test("extractAssistantUsage clamps cached input and excludes plan mode", () => {
   assert.equal(extractAssistantUsage(assistant("a", { input: 10, cached: 100, output: 5 })).tokens, 5)
   assert.equal(extractAssistantUsage(assistant("p", { input: 10, output: 5, mode: "plan" })).tokens, 0)
+})
+
+test("legacy semantics survive load without charging formula migration and concurrent replays", async () => {
+  await withState(async dir => {
+    const target = await createTarget(dir, "legacy", "Preserve legacy counters")
+    const sample = { sessionID: "legacy", message: assistant("old", { input: 100, cached: 40, output: 20 }) }
+    const legacy = { ...target, tokensUsed: 80, rootTokensUsed: 80, usageByMessage: { "legacy:old": 80 }, accounting: { truncated: true } }
+    await writeFile(targetPath(dir, "legacy"), JSON.stringify(legacy))
+    await Promise.all(Array.from({ length: 4 }, () => accountTargetUsage(dir, "legacy", [sample], { expectedTargetID: target.targetID })))
+    const loaded = await readTarget(dir, "legacy")
+    assert.equal(loaded.tokensUsed, 80)
+    assert.equal(loaded.accounting.tokenSemantics, "legacy")
+    assert.equal(loaded.accounting.truncated, true)
+  })
 })
 
 test("active wall-clock accounting advances and persists its baseline", async () => {
@@ -327,7 +350,7 @@ test("budget crossing is enforced by runtime and budget_limited takes precedence
     let updated = await accountTargetUsage(dir, "s", [
       { sessionID: "s", message: assistant("a", { input: 80, cached: 10, output: 30 }) },
     ], { expectedTargetID: m.targetID })
-    assert.equal(updated.tokensUsed, 100)
+    assert.equal(updated.tokensUsed, 110)
     assert.equal(updated.status, "budget_limited")
 
     updated = await pauseTarget(dir, "s", "try pause", m.targetID)
@@ -482,9 +505,9 @@ test("snapshot exposes remaining budget and root/descendant split", async () => 
       { sessionID: "c", message: assistant("c", { input: 50, output: 10 }) },
     ], { expectedTargetID: m.targetID })
     const view = snapshotTarget(updated)
-    assert.equal(view.target.rootTokensUsed, 90)
+    assert.equal(view.target.rootTokensUsed, 110)
     assert.equal(view.target.descendantTokensUsed, 60)
-    assert.equal(view.remainingTokens, 850)
+    assert.equal(view.remainingTokens, 830)
   })
 })
 

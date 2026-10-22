@@ -50,7 +50,7 @@ try {
   assert.equal(promptCount, 2)
   assert.equal(final.status, "complete")
   assert.equal(final.continuationCount, 2)
-  assert.equal(final.tokensUsed, 30)
+  assert.equal(final.tokensUsed, 35)
 
   const [{ TargetPlugin: TargetPluginA }, { TargetPlugin: TargetPluginB }] = await Promise.all([
     import("../src/server.js?lease-instance=a"),

@@ -23,11 +23,47 @@ test("UsageLedger records only positive deltas and splits root from descendants"
   })
 })
 
-test("UsageLedger exposes completeness when traversal is capped", () => {
+test("UsageLedger retains identity beyond its former cap across replay and restart", () => {
   const ledger = new UsageLedger({ createdAtMs: 0, maxEntries: 1 })
-  ledger.record([{ sessionID: "root", message: assistant("a", 1, 1) }])
-  ledger.record([{ sessionID: "root", message: assistant("b", 1, 1) }])
-  assert.equal(ledger.completeness().truncated, true)
+  const samples = ["a", "b", "c"].map(id => ({ sessionID: "root", message: assistant(id, 1, 1) }))
+  assert.equal(ledger.record(samples).totalDelta, 6)
+  assert.equal(ledger.record(samples).totalDelta, 0)
+  const restored = new UsageLedger({ maxEntries: 1, usageByMessage: JSON.parse(JSON.stringify(Object.fromEntries(ledger.usageByMessage))) })
+  assert.equal(restored.record(samples).totalDelta, 0)
+  assert.equal(restored.completeness().truncated, false)
+})
+
+test("streaming growth, stale updates and a separate retry message survive restart", () => {
+  const ledger = new UsageLedger()
+  const sample = n => ({ sessionID: "root", message: assistant("stream", 10, n) })
+  assert.equal(ledger.record([sample(0), sample(5), sample(3), sample(8), sample(8)]).totalDelta, 18)
+  const restored = new UsageLedger({ usageByMessage: Object.fromEntries(ledger.usageByMessage) })
+  assert.equal(restored.record([sample(5), sample(8)]).totalDelta, 0)
+  assert.equal(restored.record([{ sessionID: "root", message: assistant("paid-retry", 10, 8) }]).totalDelta, 18)
+  assert.equal(restored.record([{ sessionID: "child", message: assistant("stream", 10, 8) }]).descendantDelta, 18)
+})
+
+test("normalized SDK usage includes reasoning and cache creation but never subtracts cache reads twice", () => {
+  const ledger = new UsageLedger()
+  const message = assistant("normalized", 6221, 136, 19584)
+  message.info.tokens.reasoning = 10
+  message.info.tokens.cache.write = 20
+  assert.equal(ledger.record([{ message }], { tokenSemantics: "opencode-normalized-v1" }).totalDelta, 6387)
+})
+
+test("distinct paid retries count once while message snapshots and duplicate parts do not add requests", () => {
+  const ledger = new UsageLedger()
+  const message = assistant("retry", 30, 0)
+  message.parts = [{ id: "attempt-1", type: "step-finish", tokens: { input: 30 } }]
+  assert.equal(ledger.record([{ message }]).totalDelta, 30)
+  message.info.tokens.input = 40
+  assert.equal(ledger.record([{ message }]).totalDelta, 10)
+  message.parts.push({ id: "attempt-2", type: "step-finish", tokens: { input: 40 } })
+  message.parts.push(message.parts[0])
+  assert.equal(ledger.record([{ message }]).totalDelta, 30)
+  assert.equal(ledger.record([{ message }]).totalDelta, 0)
+  const restarted = new UsageLedger({ usageByMessage: Object.fromEntries(ledger.usageByMessage) })
+  assert.equal(restarted.record([{ message }]).totalDelta, 0)
 })
 
 test("late-discovered pre-Target messages establish a zero-charge baseline then accrue deltas", () => {

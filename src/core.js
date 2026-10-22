@@ -258,11 +258,6 @@ export function normalizeTarget(target) {
   const status = target.status
   const at = nowMs()
   const usageByMessage = normalizedUsageMap(target.usageByMessage)
-  const usageKeys = Object.keys(usageByMessage)
-  const usageWasTrimmed = usageKeys.length > ACCOUNTING_ENTRY_LIMIT
-  const trimmedUsage = usageWasTrimmed
-    ? Object.fromEntries(usageKeys.slice(-ACCOUNTING_ENTRY_LIMIT).map((key) => [key, usageByMessage[key]]))
-    : usageByMessage
 
   return {
     version: SCHEMA_VERSION,
@@ -300,11 +295,12 @@ export function normalizeTarget(target) {
     stopReason: target.stopReason ? String(target.stopReason) : null,
     budgetWrapupSent: Boolean(target.budgetWrapupSent),
     schedulerLease: normalizeSchedulerLease(target.schedulerLease),
-    usageByMessage: trimmedUsage,
+    usageByMessage,
     accounting: {
-      trackedMessages: Object.keys(trimmedUsage).length,
-      maxEntries: ACCOUNTING_ENTRY_LIMIT,
-      truncated: Boolean(target.accounting?.truncated || usageWasTrimmed),
+      tokenSemantics: target.accounting?.tokenSemantics === "opencode-normalized-v1" ? "opencode-normalized-v1" : "legacy",
+      trackedMessages: Object.keys(usageByMessage).length,
+      maxEntries: null,
+      truncated: Boolean(target.accounting?.truncated),
     },
     runtime: normalizeRuntime(target.runtime),
   }
@@ -391,6 +387,7 @@ export function newTarget(sessionID, objective, tokenBudget = null, at = nowMs()
     stopReason: null,
     budgetWrapupSent: false,
     usageByMessage: {},
+    accounting: { tokenSemantics: "opencode-normalized-v1" },
     runtime: {},
   })
 }
@@ -464,14 +461,9 @@ export async function createTarget(
       rootSessionID: sessionID,
       maxEntries: ACCOUNTING_ENTRY_LIMIT,
     })
-    ledger.record(baselineSamples)
-    if (ledger.truncated) {
-      const error = new Error(`Target usage baseline exceeds the ${ACCOUNTING_ENTRY_LIMIT}-message watermark capacity.`)
-      error.code = "TARGET_BASELINE_TOO_LARGE"
-      throw error
-    }
+    ledger.record(baselineSamples, { tokenSemantics: created.accounting.tokenSemantics })
     created.usageByMessage = Object.fromEntries(ledger.usageByMessage)
-    created.accounting = ledger.completeness()
+    created.accounting = { ...created.accounting, ...ledger.completeness() }
     appendJournal(created, "created", { objective: created.objective })
     created.limits = {
       maxAutomaticTurns: normalizeLimit(maxAutomaticTurns),
@@ -796,15 +788,12 @@ export async function seedTargetUsageBaselines(
     const usageByMessage = { ...target.usageByMessage }
     for (const sample of samples || []) {
       const childSessionID = String(sample?.sessionID || sessionID)
-      const usage = extractAssistantUsage(sample?.message ?? sample, { excludePlanMode })
+      const usage = extractLedgerUsage(sample?.message ?? sample, { excludePlanMode, tokenSemantics: target.accounting.tokenSemantics })
       if (!usage || !usage.id) continue
       const key = accountingKey(childSessionID, usage.id)
       usageByMessage[key] = Math.max(Math.max(0, Number(usageByMessage[key]) || 0), usage.tokens)
     }
-    const keys = Object.keys(usageByMessage)
-    target.usageByMessage = keys.length > ACCOUNTING_ENTRY_LIMIT
-      ? Object.fromEntries(keys.slice(-ACCOUNTING_ENTRY_LIMIT).map((key) => [key, usageByMessage[key]]))
-      : usageByMessage
+    target.usageByMessage = usageByMessage
     target.updatedAtMs = nowMs()
     return writeTargetUnlocked(stateDir, target)
   })
@@ -831,11 +820,12 @@ export async function accountTargetUsage(
       usageByMessage: target.usageByMessage,
       maxEntries: ACCOUNTING_ENTRY_LIMIT,
     })
-    const { rootDelta, descendantDelta } = ledger.record(samples, { excludePlanMode })
+    const { rootDelta, descendantDelta } = ledger.record(samples, { excludePlanMode, tokenSemantics: target.accounting.tokenSemantics })
 
     target.usageByMessage = Object.fromEntries(ledger.usageByMessage)
     const completeness = ledger.completeness()
     target.accounting = {
+      tokenSemantics: target.accounting.tokenSemantics,
       ...completeness,
       truncated: Boolean(target.accounting?.truncated || completeness.truncated),
     }
